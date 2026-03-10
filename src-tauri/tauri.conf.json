@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "debate-watch",
+  "productName": "agora",
   "version": "0.1.0",
-  "identifier": "com.joe.debate-watch",
+  "identifier": "dev.notbatman.agora",
   "build": {
     "frontendDist": "../src"
   },
@@ -11,7 +11,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "debate-watch",
+        "title": "agora",
         "width": 920,
         "height": 660,
         "minWidth": 500,

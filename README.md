@@ -1,4 +1,4 @@
-# debate-watch
+# agora
 
 native desktop viewer for claude code team debates. watches `~/.claude/teams/` for inbox messages and renders them as a live chat feed.
 
@@ -32,16 +32,16 @@ cd debate-watch
 cargo tauri build
 ```
 
-the `.app` bundle lands in `src-tauri/target/release/bundle/macos/debate-watch.app`. copy it to `/Applications/` or run directly.
+the `.app` bundle lands in `src-tauri/target/release/bundle/macos/agora.app`. copy it to `/Applications/` or run directly.
 
 ## usage
 
 ```bash
 # open the app
-open /Applications/debate-watch.app
+open /Applications/agora.app
 
 # or filter to a single team on launch
-./debate-watch --team deliberation
+./agora --team deliberation
 ```
 
 ## stack

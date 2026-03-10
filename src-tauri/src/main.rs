@@ -80,8 +80,21 @@ fn now_ms() -> u64 {
 // Inbox parsing — flexible multi-strategy parser
 // ---------------------------------------------------------------------------
 
+/// Non-message types that should be filtered out of the chat view.
+fn is_system_type(val: &serde_json::Value) -> bool {
+    matches!(
+        val.get("type").and_then(|v| v.as_str()),
+        Some("idle_notification" | "heartbeat" | "ping" | "status_update" | "shutdown_request")
+    )
+}
+
 /// Try to extract (from, to, content) from a single JSON value.
 fn extract_msg(val: &serde_json::Value, default_to: &str) -> Option<(String, String, String)> {
+    // Skip non-message system types
+    if is_system_type(val) {
+        return None;
+    }
+
     let from = ["from", "sender"]
         .iter()
         .find_map(|k| val.get(k)?.as_str())
