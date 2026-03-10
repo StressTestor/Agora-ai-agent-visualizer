@@ -42,10 +42,13 @@
   #header > * { -webkit-app-region: no-drag; }
 
   #app-name {
-    position: absolute;
-    left: 50%; transform: translateX(-50%);
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    height: 40px;
+    display: flex; align-items: center; justify-content: center;
     font-weight: 600; font-size: 13px; letter-spacing: 0.03em;
     pointer-events: none;
+    z-index: 1;
   }
 
   #team-select {
@@ -160,9 +163,9 @@
       <option value="">all teams</option>
     </select>
     <div class="spacer"></div>
-    <span id="app-name">agora</span>
     <button id="btn-clear">clear</button>
   </div>
+  <span id="app-name">agora</span>
 
   <div id="chips"></div>
 
