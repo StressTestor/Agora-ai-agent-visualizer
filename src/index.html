@@ -963,7 +963,6 @@ async function renderStep1() {
   statusGroup.append(statusLabel, statusRow);
 
   // Import from existing team
-  const { invoke } = window.__TAURI__.core;
   const teamConfigs = await invoke('list_team_configs');
   if (teamConfigs.length > 0) {
     const importGroup = document.createElement('div');
