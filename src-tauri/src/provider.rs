@@ -102,7 +102,7 @@ impl OpenAiCompatible {
             "openai" => "https://api.openai.com/v1",
             "openrouter" => "https://openrouter.ai/api/v1",
             "groq" => "https://api.groq.com/openai/v1",
-            "opencode" => "https://openrouter.ai/api/v1",
+            "opencode" => "https://opencode.ai/zen/v1",
             "deepseek" => "https://api.deepseek.com/v1",
             "moonshot" => "https://api.moonshot.cn/v1",
             "minimax" => "https://api.minimaxi.chat/v1",

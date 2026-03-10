@@ -720,6 +720,8 @@ function showToast(msg) {
 const $settingsOverlay = document.getElementById('settings-overlay');
 const $settingsProviders = document.getElementById('settings-providers');
 const PROVIDERS = ['openai', 'openrouter', 'groq', 'opencode', 'anthropic', 'deepseek', 'moonshot', 'minimax', 'minimax-coding', 'zai', 'zai-coding'];
+const PROVIDER_LABELS = { 'opencode': 'opencode zen', 'minimax-coding': 'minimax (coding plan)', 'zai-coding': 'z.ai (coding plan)' };
+const providerLabel = p => PROVIDER_LABELS[p] || p;
 
 document.getElementById('btn-settings').addEventListener('click', async () => {
   await loadSettings();
@@ -746,7 +748,7 @@ async function loadSettings() {
 
     const label = document.createElement('label');
     label.className = 'field-label';
-    label.textContent = name;
+    label.textContent = providerLabel(name);
 
     const row = document.createElement('div');
     row.className = 'field-row';
@@ -956,7 +958,7 @@ async function renderStep1() {
     const hasKey = config.providers[name] && config.providers[name].api_key;
     const chip = document.createElement('span');
     chip.style.cssText = `font-size:10px;color:${hasKey ? '#34d399' : 'var(--muted)'}`;
-    chip.textContent = `${hasKey ? '●' : '○'} ${name}`;
+    chip.textContent = `${hasKey ? '●' : '○'} ${providerLabel(name)}`;
     statusRow.appendChild(chip);
   });
 
@@ -1109,7 +1111,7 @@ function renderAgentRow(container, agent, idx) {
   PROVIDERS.forEach(p => {
     const opt = document.createElement('option');
     opt.value = p;
-    opt.textContent = p;
+    opt.textContent = providerLabel(p);
     if (agent.provider === p) opt.selected = true;
     providerSelect.appendChild(opt);
   });
