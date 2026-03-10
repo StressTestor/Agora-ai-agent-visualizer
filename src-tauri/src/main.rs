@@ -317,6 +317,46 @@ fn get_teams() -> Vec<String> {
     list_teams(&teams_dir())
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct TeamMemberConfig {
+    name: String,
+    model: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TeamConfig {
+    name: String,
+    description: String,
+    members: Vec<TeamMemberConfig>,
+}
+
+#[tauri::command]
+fn list_team_configs() -> Vec<TeamConfig> {
+    let tdir = teams_dir();
+    let mut result = vec![];
+    for team in list_teams(&tdir) {
+        let path = tdir.join(&team).join("config.json");
+        let Ok(raw) = std::fs::read_to_string(&path) else { continue };
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) else { continue };
+        let name = val["name"].as_str().unwrap_or(&team).to_string();
+        let description = val["description"].as_str().unwrap_or("").to_string();
+        let members = val["members"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| {
+                        let mname = m["name"].as_str()?.to_string();
+                        let model = m["model"].as_str().unwrap_or("").to_string();
+                        Some(TeamMemberConfig { name: mname, model })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        result.push(TeamConfig { name, description, members });
+    }
+    result
+}
+
 #[tauri::command]
 fn delete_team(team: String) -> Result<(), String> {
     let path = teams_dir().join(&team);
@@ -505,6 +545,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
                 get_teams,
                 delete_team,
+                list_team_configs,
                 get_messages,
                 get_config,
                 save_config,

@@ -961,7 +961,66 @@ async function renderStep1() {
   });
 
   statusGroup.append(statusLabel, statusRow);
-  $wizardBody.append(nameGroup, presetGroup, statusGroup);
+
+  // Import from existing team
+  const { invoke } = window.__TAURI__.core;
+  const teamConfigs = await invoke('list_team_configs');
+  if (teamConfigs.length > 0) {
+    const importGroup = document.createElement('div');
+    importGroup.className = 'field-group';
+    const importLabel = document.createElement('label');
+    importLabel.className = 'field-label';
+    importLabel.textContent = 'import from existing team';
+    const importSelect = document.createElement('select');
+    importSelect.className = 'field-input';
+    importSelect.style.cursor = 'pointer';
+    const blankOpt = document.createElement('option');
+    blankOpt.value = '';
+    blankOpt.textContent = '— select team —';
+    importSelect.appendChild(blankOpt);
+    teamConfigs.forEach((tc, i) => {
+      const opt = document.createElement('option');
+      opt.value = i;
+      opt.textContent = tc.description ? `${tc.name} — ${tc.description}` : tc.name;
+      importSelect.appendChild(opt);
+    });
+
+    importSelect.addEventListener('change', () => {
+      const idx = importSelect.value;
+      if (idx === '') return;
+      const tc = teamConfigs[parseInt(idx)];
+      // Set team name
+      const nameInput = document.getElementById('wizard-team-name');
+      if (nameInput) nameInput.value = tc.name;
+      wizardState.teamName = tc.name;
+      // Map members to agents
+      wizardState.agents = tc.members.map(m => {
+        const provider = inferProvider(m.model);
+        const role = cachedRoles.find(r => r.name === m.name.toLowerCase()) || null;
+        return {
+          name: m.name,
+          provider,
+          model: m.model,
+          role: role ? role.name : 'custom',
+          system_prompt: role ? role.system_prompt : '',
+        };
+      });
+      showToast(`imported ${tc.members.length} agents from "${tc.name}"`);
+    });
+
+    importGroup.append(importLabel, importSelect);
+    $wizardBody.append(nameGroup, presetGroup, importGroup, statusGroup);
+  } else {
+    $wizardBody.append(nameGroup, presetGroup, statusGroup);
+  }
+}
+
+function inferProvider(model) {
+  if (!model) return '';
+  if (model.startsWith('claude-')) return 'anthropic';
+  if (model.startsWith('gpt-') || model.startsWith('o1') || model.startsWith('o3')) return 'openai';
+  if (model.includes('/')) return 'openrouter'; // openrouter format: "org/model"
+  return '';
 }
 
 function saveStep1() {
