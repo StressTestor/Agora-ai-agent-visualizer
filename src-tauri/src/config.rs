@@ -22,6 +22,9 @@ const PROVIDER_ENV_VARS: &[(&str, &str)] = &[
     ("groq", "GROQ_API_KEY"),
     ("opencode", "OPENCODE_API_KEY"),
     ("anthropic", "ANTHROPIC_API_KEY"),
+    ("deepseek", "DEEPSEEK_API_KEY"),
+    ("moonshot", "MOONSHOT_API_KEY"),
+    ("minimax", "MINIMAX_API_KEY"),
 ];
 
 fn config_path() -> PathBuf {

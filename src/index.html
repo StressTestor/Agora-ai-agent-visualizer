@@ -719,7 +719,7 @@ function showToast(msg) {
 // ── Settings panel ───────────────────────────────────────────
 const $settingsOverlay = document.getElementById('settings-overlay');
 const $settingsProviders = document.getElementById('settings-providers');
-const PROVIDERS = ['openai', 'openrouter', 'groq', 'opencode', 'anthropic'];
+const PROVIDERS = ['openai', 'openrouter', 'groq', 'opencode', 'anthropic', 'deepseek', 'moonshot', 'minimax'];
 
 document.getElementById('btn-settings').addEventListener('click', async () => {
   await loadSettings();
@@ -1018,7 +1018,10 @@ function inferProvider(model) {
   if (!model) return '';
   if (model.startsWith('claude-')) return 'anthropic';
   if (model.startsWith('gpt-') || model.startsWith('o1') || model.startsWith('o3')) return 'openai';
-  if (model.includes('/')) return 'openrouter'; // openrouter format: "org/model"
+  if (model.startsWith('deepseek-')) return 'deepseek';
+  if (model.startsWith('moonshot-') || model.startsWith('kimi-')) return 'moonshot';
+  if (model.startsWith('MiniMax-') || model.startsWith('minimax-') || model.startsWith('abab')) return 'minimax';
+  if (model.includes('/')) return 'openrouter';
   return '';
 }
 

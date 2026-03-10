@@ -103,6 +103,9 @@ impl OpenAiCompatible {
             "openrouter" => "https://openrouter.ai/api/v1",
             "groq" => "https://api.groq.com/openai/v1",
             "opencode" => "https://openrouter.ai/api/v1",
+            "deepseek" => "https://api.deepseek.com/v1",
+            "moonshot" => "https://api.moonshot.cn/v1",
+            "minimax" => "https://api.minimaxi.chat/v1",
             _ => return None,
         };
         Some(Self::new(name, base_url, api_key))
@@ -335,7 +338,7 @@ impl Provider for AnthropicClient {
 pub fn build_provider(name: &str, api_key: &str) -> Option<Box<dyn Provider>> {
     match name {
         "anthropic" => Some(Box::new(AnthropicClient::new(api_key))),
-        "openai" | "openrouter" | "groq" | "opencode" => {
+        "openai" | "openrouter" | "groq" | "opencode" | "deepseek" | "moonshot" | "minimax" => {
             OpenAiCompatible::for_provider(name, api_key).map(|p| Box::new(p) as Box<dyn Provider>)
         }
         _ => None,
