@@ -1,9 +1,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod config;
+mod orchestrator;
+mod presets;
+mod provider;
+
 use chrono::DateTime;
+use config::AppConfig;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
+use orchestrator::{DebateConfig, DebateState};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -35,6 +42,8 @@ struct AppState {
     seen_hashes: HashSet<u64>,
     messages: Vec<Message>,
     known_teams: HashSet<String>,
+    config: AppConfig,
+    debates: HashMap<String, Arc<Mutex<DebateState>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +322,142 @@ fn get_messages(state: State<'_, Arc<Mutex<AppState>>>) -> Vec<Message> {
     state.lock().unwrap().messages.clone()
 }
 
+#[tauri::command]
+fn get_config(state: State<'_, Arc<Mutex<AppState>>>) -> AppConfig {
+    state.lock().unwrap().config.clone()
+}
+
+#[tauri::command]
+fn save_config(
+    state: State<'_, Arc<Mutex<AppState>>>,
+    config: AppConfig,
+) -> Result<(), String> {
+    config.save()?;
+    state.lock().unwrap().config = config;
+    Ok(())
+}
+
+#[tauri::command]
+fn list_models(
+    state: State<'_, Arc<Mutex<AppState>>>,
+    provider_name: String,
+) -> Result<Vec<provider::ModelInfo>, String> {
+    let api_key = {
+        let st = state.lock().unwrap();
+        st.config
+            .api_key(&provider_name)
+            .ok_or_else(|| format!("no API key configured for '{provider_name}'"))?
+    };
+    let p = provider::build_provider(&provider_name, &api_key)
+        .ok_or_else(|| format!("unknown provider '{provider_name}'"))?;
+    p.list_models().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_role_presets() -> Vec<presets::RolePreset> {
+    presets::role_presets()
+}
+
+#[tauri::command]
+fn list_debate_presets() -> Vec<presets::DebatePreset> {
+    presets::debate_presets()
+}
+
+#[tauri::command]
+fn create_debate(
+    state: State<'_, Arc<Mutex<AppState>>>,
+    config: DebateConfig,
+) -> Result<String, String> {
+    let team = config.team_name.clone();
+    let debate_state = Arc::new(Mutex::new(DebateState::new(config)));
+    let mut st = state.lock().unwrap();
+    st.debates.insert(team.clone(), debate_state);
+    Ok(team)
+}
+
+#[tauri::command]
+fn start_debate_cmd(
+    app: AppHandle,
+    state: State<'_, Arc<Mutex<AppState>>>,
+    team: String,
+) -> Result<(), String> {
+    let (debate_state, app_config) = {
+        let st = state.lock().unwrap();
+        let ds = st
+            .debates
+            .get(&team)
+            .ok_or_else(|| format!("no debate '{team}'"))?
+            .clone();
+        (ds, st.config.clone())
+    };
+    orchestrator::start_debate(app, app_config, debate_state);
+    Ok(())
+}
+
+#[tauri::command]
+fn stop_debate(
+    state: State<'_, Arc<Mutex<AppState>>>,
+    team: String,
+) -> Result<(), String> {
+    let st = state.lock().unwrap();
+    let ds = st
+        .debates
+        .get(&team)
+        .ok_or_else(|| format!("no debate '{team}'"))?;
+    let mut debate = ds.lock().unwrap();
+    debate.status = orchestrator::DebateStatus::Stopped;
+    Ok(())
+}
+
+#[tauri::command]
+fn pause_debate(
+    state: State<'_, Arc<Mutex<AppState>>>,
+    team: String,
+) -> Result<(), String> {
+    let st = state.lock().unwrap();
+    let ds = st
+        .debates
+        .get(&team)
+        .ok_or_else(|| format!("no debate '{team}'"))?;
+    let mut debate = ds.lock().unwrap();
+    match debate.status {
+        orchestrator::DebateStatus::Running => {
+            debate.status = orchestrator::DebateStatus::Paused;
+        }
+        orchestrator::DebateStatus::Paused => {
+            debate.status = orchestrator::DebateStatus::Running;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_debate_status(
+    state: State<'_, Arc<Mutex<AppState>>>,
+    team: String,
+) -> Result<orchestrator::DebateStatusEvent, String> {
+    let st = state.lock().unwrap();
+    let ds = st
+        .debates
+        .get(&team)
+        .ok_or_else(|| format!("no debate '{team}'"))?;
+    let debate = ds.lock().unwrap();
+    let status_str = match &debate.status {
+        orchestrator::DebateStatus::Running => "running",
+        orchestrator::DebateStatus::Paused => "paused",
+        orchestrator::DebateStatus::Stopped => "stopped",
+        orchestrator::DebateStatus::Converged => "converged",
+        orchestrator::DebateStatus::Error(_) => "error",
+    };
+    Ok(orchestrator::DebateStatusEvent {
+        team: debate.config.team_name.clone(),
+        status: status_str.to_string(),
+        round: debate.current_round,
+        total_messages: debate.messages.len(),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -332,10 +477,14 @@ fn main() {
     let tdir = teams_dir();
     let initial_known: HashSet<String> = list_teams(&tdir).into_iter().collect();
 
+    let app_config = AppConfig::load();
+
     let shared_state = Arc::new(Mutex::new(AppState {
         seen_hashes: HashSet::new(),
         messages: vec![],
         known_teams: initial_known,
+        config: app_config,
+        debates: HashMap::new(),
     }));
 
     let state_for_setup = shared_state.clone();
@@ -343,7 +492,20 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_window_state::Builder::new().build())
         .manage(shared_state)
-        .invoke_handler(tauri::generate_handler![get_teams, get_messages])
+        .invoke_handler(tauri::generate_handler![
+                get_teams,
+                get_messages,
+                get_config,
+                save_config,
+                list_models,
+                list_role_presets,
+                list_debate_presets,
+                create_debate,
+                start_debate_cmd,
+                stop_debate,
+                pause_debate,
+                get_debate_status,
+            ])
         .setup(move |app| {
             let handle: AppHandle = app.handle().clone();
             let state = state_for_setup.clone();
