@@ -60,6 +60,15 @@
   #team-select:focus { border-color: var(--cyan); }
   #team-select option { background: var(--surface); }
 
+  #search-input {
+    background: var(--surface); border: 1px solid var(--border);
+    color: var(--text); font-family: inherit; font-size: 11px;
+    padding: 2px 6px; border-radius: 4px; outline: none;
+    width: 140px;
+  }
+  #search-input:focus { border-color: var(--cyan); }
+  #search-input::placeholder { color: var(--muted); }
+
   .spacer { flex: 1; }
 
   #btn-clear {
@@ -162,6 +171,7 @@
     <select id="team-select">
       <option value="">all teams</option>
     </select>
+    <input id="search-input" type="text" placeholder="search... (⌘K)">
     <div class="spacer"></div>
     <button id="btn-clear">clear</button>
   </div>
@@ -247,6 +257,7 @@ const $msgCount   = document.getElementById('msg-count');
 const $filterStat = document.getElementById('filter-status');
 const $scrollBtn  = document.getElementById('scroll-btn');
 const $empty      = document.getElementById('empty');
+const $search     = document.getElementById('search-input');
 
 // ── Scroll ────────────────────────────────────────────────────
 $chat.addEventListener('scroll', () => {
@@ -391,6 +402,8 @@ function appendSystem(text) {
 
 // ── Filter ────────────────────────────────────────────────────
 function applyFilter() {
+  // Clear search when switching teams
+  $search.value = '';
   // Wipe chat (keep $empty node)
   while ($chat.firstChild) $chat.removeChild($chat.firstChild);
   $chat.appendChild($empty);
@@ -438,7 +451,40 @@ $teamSelect.addEventListener('change', () => {
 // ── Clear ─────────────────────────────────────────────────────
 document.getElementById('btn-clear').addEventListener('click', () => {
   messages = [];
+  $search.value = '';
   applyFilter();
+});
+
+// ── Search ────────────────────────────────────────────────────
+function applySearch() {
+  const q = $search.value.toLowerCase();
+  const msgs = $chat.querySelectorAll('.msg');
+  let visible = 0;
+  msgs.forEach(el => {
+    const match = !q || el.querySelector('.msg-body').textContent.toLowerCase().includes(q);
+    el.style.display = match ? '' : 'none';
+    if (match) visible++;
+  });
+  const total = msgs.length;
+  $msgCount.textContent = q
+    ? `${visible} of ${total} messages`
+    : `${total} message${total !== 1 ? 's' : ''}`;
+}
+
+$search.addEventListener('input', applySearch);
+
+// ── Keyboard shortcuts ───────────────────────────────────────
+document.addEventListener('keydown', (e) => {
+  if (e.metaKey && e.key === 'k') {
+    e.preventDefault();
+    $search.focus();
+    $search.select();
+  }
+  if (e.key === 'Escape' && document.activeElement === $search) {
+    $search.value = '';
+    $search.dispatchEvent(new Event('input'));
+    $search.blur();
+  }
 });
 
 // ── Tauri bridge ──────────────────────────────────────────────
@@ -462,7 +508,13 @@ async function init() {
     messages.push(msg);
     if (!currentFilter || msg.team === currentFilter) {
       $empty.style.display = 'none';
-      $chat.appendChild(buildMessageNode(msg));
+      const node = buildMessageNode(msg);
+      $chat.appendChild(node);
+      // Respect active search
+      const q = $search.value.toLowerCase();
+      if (q && !node.querySelector('.msg-body').textContent.toLowerCase().includes(q)) {
+        node.style.display = 'none';
+      }
       maybeScroll();
     }
     updateFooter();

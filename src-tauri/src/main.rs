@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use chrono::DateTime;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -88,8 +89,30 @@ fn is_system_type(val: &serde_json::Value) -> bool {
     )
 }
 
-/// Try to extract (from, to, content) from a single JSON value.
-fn extract_msg(val: &serde_json::Value, default_to: &str) -> Option<(String, String, String)> {
+/// Try to parse a JSON timestamp value into epoch milliseconds.
+fn parse_json_timestamp(val: &serde_json::Value) -> Option<u64> {
+    if let Some(ts) = val.get("timestamp") {
+        // Numeric epoch ms
+        if let Some(n) = ts.as_u64() {
+            return Some(n);
+        }
+        // ISO 8601 string
+        if let Some(s) = ts.as_str() {
+            if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+                return Some(dt.timestamp_millis() as u64);
+            }
+            // Try as numeric string
+            if let Ok(n) = s.parse::<u64>() {
+                return Some(n);
+            }
+        }
+    }
+    None
+}
+
+/// Try to extract (from, to, content, timestamp) from a single JSON value.
+/// Timestamp is 0 if not found in the JSON (caller provides fallback).
+fn extract_msg(val: &serde_json::Value, default_to: &str) -> Option<(String, String, String, u64)> {
     // Skip non-message system types
     if is_system_type(val) {
         return None;
@@ -111,11 +134,24 @@ fn extract_msg(val: &serde_json::Value, default_to: &str) -> Option<(String, Str
         .map(String::from)
         .unwrap_or_else(|| default_to.to_string());
 
-    Some((from, to, content))
+    let ts = parse_json_timestamp(val).unwrap_or(0);
+
+    Some((from, to, content, ts))
+}
+
+/// Read file mtime as epoch milliseconds, or 0.
+fn file_mtime_ms(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Parse an inbox JSON file; "to" is inferred from the filename.
-fn parse_inbox(path: &Path, _team: &str) -> Vec<(String, String, String)> {
+/// Returns (from, to, content, timestamp) tuples with resolved timestamps.
+fn parse_inbox(path: &Path, _team: &str) -> Vec<(String, String, String, u64)> {
     let to = path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -132,11 +168,21 @@ fn parse_inbox(path: &Path, _team: &str) -> Vec<(String, String, String)> {
         Err(_) => return vec![],
     };
 
+    let mtime = file_mtime_ms(path);
+    let fallback = if mtime > 0 { mtime } else { now_ms() };
+
+    // Resolve timestamps: JSON timestamp > file mtime > now
+    let resolve = |msgs: Vec<(String, String, String, u64)>| -> Vec<(String, String, String, u64)> {
+        msgs.into_iter()
+            .map(|(f, t, c, ts)| (f, t, c, if ts > 0 { ts } else { fallback }))
+            .collect()
+    };
+
     // Strategy 1: top-level array
     if let Some(arr) = val.as_array() {
         let msgs: Vec<_> = arr.iter().filter_map(|v| extract_msg(v, &to)).collect();
         if !msgs.is_empty() {
-            return msgs;
+            return resolve(msgs);
         }
     }
 
@@ -144,7 +190,7 @@ fn parse_inbox(path: &Path, _team: &str) -> Vec<(String, String, String)> {
     if let Some(arr) = val.get("messages").and_then(|v| v.as_array()) {
         let msgs: Vec<_> = arr.iter().filter_map(|v| extract_msg(v, &to)).collect();
         if !msgs.is_empty() {
-            return msgs;
+            return resolve(msgs);
         }
     }
 
@@ -152,13 +198,13 @@ fn parse_inbox(path: &Path, _team: &str) -> Vec<(String, String, String)> {
     if let Some(arr) = val.get("inbox").and_then(|v| v.as_array()) {
         let msgs: Vec<_> = arr.iter().filter_map(|v| extract_msg(v, &to)).collect();
         if !msgs.is_empty() {
-            return msgs;
+            return resolve(msgs);
         }
     }
 
     // Strategy 4: single message object
     if let Some(msg) = extract_msg(&val, &to) {
-        return vec![msg];
+        return resolve(vec![msg]);
     }
 
     // Strategy 5: { sender_name: "text" } key-value map
@@ -170,7 +216,7 @@ fn parse_inbox(path: &Path, _team: &str) -> Vec<(String, String, String)> {
                     .as_str()
                     .map(String::from)
                     .unwrap_or_else(|| v.to_string());
-                (k.clone(), to.clone(), content)
+                (k.clone(), to.clone(), content, fallback)
             })
             .collect();
     }
@@ -211,14 +257,14 @@ fn scan_inboxes(dir: &Path, state: &mut AppState) -> Vec<Message> {
             if path.extension().and_then(|x| x.to_str()) != Some("json") {
                 continue;
             }
-            for (from, to, content) in parse_inbox(&path, &team) {
+            for (from, to, content, ts) in parse_inbox(&path, &team) {
                 let hash = hash_message(&team, &from, &to, &content);
                 if state.seen_hashes.insert(hash) {
                     let msg = Message {
                         from,
                         to,
                         content,
-                        timestamp: now_ms(),
+                        timestamp: ts,
                         team: team.clone(),
                     };
                     state.messages.push(msg.clone());
