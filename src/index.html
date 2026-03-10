@@ -28,6 +28,7 @@
 
   /* Header */
   #header {
+    position: relative;
     display: flex;
     align-items: center;
     gap: 10px;
@@ -40,7 +41,12 @@
   }
   #header > * { -webkit-app-region: no-drag; }
 
-  #app-name { font-weight: 600; font-size: 13px; letter-spacing: 0.03em; }
+  #app-name {
+    position: absolute;
+    left: 50%; transform: translateX(-50%);
+    font-weight: 600; font-size: 13px; letter-spacing: 0.03em;
+    pointer-events: none;
+  }
 
   #status-dot {
     width: 7px; height: 7px; border-radius: 50%;
