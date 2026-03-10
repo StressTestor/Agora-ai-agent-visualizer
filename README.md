@@ -27,8 +27,8 @@ cargo install tauri-cli --version '^2'
 then build:
 
 ```bash
-git clone https://github.com/StressTestor/debate-watch.git
-cd debate-watch
+git clone https://github.com/StressTestor/Agora-ai-agent-visualizer.git
+cd Agora-ai-agent-visualizer
 cargo tauri build
 ```
 
