@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#0d1117"/>
+  <!-- Outer bubble (advocate cyan) -->
+  <path d="M60 130 C60 96 88 72 122 72 L390 72 C424 72 452 96 452 130 L452 290 C452 324 424 348 390 348 L220 348 L148 428 L148 348 C114 348 86 324 86 290 Z"
+        fill="none" stroke="#22d3ee" stroke-width="18" stroke-linejoin="round"/>
+  <!-- Inner dots: cyan / red / purple -->
+  <circle cx="186" cy="210" r="24" fill="#22d3ee"/>
+  <circle cx="256" cy="210" r="24" fill="#f87171"/>
+  <circle cx="326" cy="210" r="24" fill="#a78bfa"/>
+</svg>
