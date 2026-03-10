@@ -1,0 +1,12 @@
+# build artifacts
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# os
+.DS_Store
+Thumbs.db
+
+# ide
+.vscode/
+.idea/
+*.swp
