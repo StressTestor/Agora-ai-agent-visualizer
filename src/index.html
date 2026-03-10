@@ -1114,54 +1114,75 @@ function renderAgentRow(container, agent, idx) {
     providerSelect.appendChild(opt);
   });
 
-  const datalistId = `model-list-${idx}`;
-  const modelDatalist = document.createElement('datalist');
-  modelDatalist.id = datalistId;
-
   const modelInput = document.createElement('input');
   modelInput.className = 'field-input';
   modelInput.placeholder = 'model ID';
   modelInput.value = agent.model;
   modelInput.dataset.idx = idx;
   modelInput.dataset.field = 'model';
-  modelInput.setAttribute('list', datalistId);
 
-  // Populate datalist when provider changes
-  providerSelect.addEventListener('change', async () => {
-    const pName = providerSelect.value;
+  function makeModelSelect(models, currentValue) {
+    const sel = document.createElement('select');
+    sel.className = 'field-input';
+    sel.dataset.idx = idx;
+    sel.dataset.field = 'model';
+    const blank = document.createElement('option');
+    blank.value = '';
+    blank.textContent = '— select model —';
+    sel.appendChild(blank);
+    models.forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = m.id;
+      if (currentValue === m.id) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    const manualOpt = document.createElement('option');
+    manualOpt.value = '__manual__';
+    manualOpt.textContent = 'enter manually...';
+    sel.appendChild(manualOpt);
+    sel.addEventListener('change', () => {
+      if (sel.value === '__manual__') {
+        const inp = document.createElement('input');
+        inp.className = 'field-input';
+        inp.placeholder = 'model ID';
+        inp.dataset.idx = idx;
+        inp.dataset.field = 'model';
+        sel.replaceWith(inp);
+        inp.focus();
+      }
+    });
+    return sel;
+  }
+
+  async function fetchAndReplaceModel(pName, currentEl, currentValue) {
     if (!pName) return;
-    modelDatalist.textContent = '';
-    modelInput.placeholder = 'loading...';
+    currentEl.placeholder = 'loading...';
     try {
       const { invoke } = window.__TAURI__.core;
       const models = await invoke('list_models', { providerName: pName });
-      models.forEach(m => {
-        const opt = document.createElement('option');
-        opt.value = m.id;
-        modelDatalist.appendChild(opt);
-      });
-      modelInput.placeholder = models.length ? 'model ID' : 'model ID (no key configured)';
+      if (models.length > 0) {
+        const sel = makeModelSelect(models, currentValue);
+        currentEl.replaceWith(sel);
+      } else {
+        currentEl.placeholder = 'model ID (no key configured)';
+      }
     } catch {
-      modelInput.placeholder = 'model ID (enter manually)';
+      currentEl.placeholder = 'model ID (enter manually)';
     }
-  });
-
-  // Pre-populate if provider already set (e.g. from team import)
-  if (agent.provider) {
-    (async () => {
-      try {
-        const { invoke } = window.__TAURI__.core;
-        const models = await invoke('list_models', { providerName: agent.provider });
-        models.forEach(m => {
-          const opt = document.createElement('option');
-          opt.value = m.id;
-          modelDatalist.appendChild(opt);
-        });
-      } catch { /* no key, user types manually */ }
-    })();
   }
 
-  pmRow.append(providerSelect, modelInput, modelDatalist);
+  providerSelect.addEventListener('change', () => {
+    const current = pmRow.querySelector('[data-field="model"]');
+    fetchAndReplaceModel(providerSelect.value, current, current.value || agent.model);
+  });
+
+  if (agent.provider) {
+    // pre-populate on render if provider already known
+    fetchAndReplaceModel(agent.provider, modelInput, agent.model);
+  }
+
+  pmRow.append(providerSelect, modelInput);
 
   const roleRow = document.createElement('div');
   roleRow.className = 'field-row';
