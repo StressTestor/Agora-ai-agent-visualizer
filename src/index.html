@@ -719,7 +719,7 @@ function showToast(msg) {
 // ── Settings panel ───────────────────────────────────────────
 const $settingsOverlay = document.getElementById('settings-overlay');
 const $settingsProviders = document.getElementById('settings-providers');
-const PROVIDERS = ['openai', 'openrouter', 'groq', 'opencode', 'anthropic', 'deepseek', 'moonshot', 'minimax'];
+const PROVIDERS = ['openai', 'openrouter', 'groq', 'opencode', 'anthropic', 'deepseek', 'moonshot', 'minimax', 'minimax-coding', 'zai', 'zai-coding'];
 
 document.getElementById('btn-settings').addEventListener('click', async () => {
   await loadSettings();
@@ -1020,6 +1020,8 @@ function inferProvider(model) {
   if (model.startsWith('gpt-') || model.startsWith('o1') || model.startsWith('o3')) return 'openai';
   if (model.startsWith('deepseek-')) return 'deepseek';
   if (model.startsWith('moonshot-') || model.startsWith('kimi-')) return 'moonshot';
+  if (model.startsWith('MiniMax-M2') || model === 'MiniMax-M2.5') return 'minimax-coding';
+  if (model.startsWith('glm-')) return 'zai';
   if (model.startsWith('MiniMax-') || model.startsWith('minimax-') || model.startsWith('abab')) return 'minimax';
   if (model.includes('/')) return 'openrouter';
   return '';

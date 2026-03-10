@@ -106,6 +106,8 @@ impl OpenAiCompatible {
             "deepseek" => "https://api.deepseek.com/v1",
             "moonshot" => "https://api.moonshot.cn/v1",
             "minimax" => "https://api.minimaxi.chat/v1",
+            "zai" => "https://api.z.ai/api/paas/v4",
+            "zai-coding" => "https://api.z.ai/api/coding/paas/v4",
             _ => return None,
         };
         Some(Self::new(name, base_url, api_key))
@@ -191,7 +193,9 @@ impl Provider for OpenAiCompatible {
 // ---------------------------------------------------------------------------
 
 pub struct AnthropicClient {
+    provider_name: String,
     api_key: String,
+    base_url: String,
     client: reqwest::blocking::Client,
 }
 
@@ -232,8 +236,14 @@ struct AnthropicModelEntry {
 
 impl AnthropicClient {
     pub fn new(api_key: &str) -> Self {
+        Self::with_base_url("anthropic", api_key, "https://api.anthropic.com")
+    }
+
+    pub fn with_base_url(provider_name: &str, api_key: &str, base_url: &str) -> Self {
         Self {
+            provider_name: provider_name.to_string(),
             api_key: api_key.to_string(),
+            base_url: base_url.trim_end_matches('/').to_string(),
             client: reqwest::blocking::Client::new(),
         }
     }
@@ -241,7 +251,7 @@ impl AnthropicClient {
 
 impl Provider for AnthropicClient {
     fn name(&self) -> &str {
-        "anthropic"
+        &self.provider_name
     }
 
     fn chat(&self, messages: &[ChatMessage], model: &str) -> Result<String, ProviderError> {
@@ -268,7 +278,7 @@ impl Provider for AnthropicClient {
 
         let resp = self
             .client
-            .post("https://api.anthropic.com/v1/messages")
+            .post(format!("{}/v1/messages", self.base_url))
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
@@ -302,13 +312,19 @@ impl Provider for AnthropicClient {
     fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         let resp = self
             .client
-            .get("https://api.anthropic.com/v1/models")
+            .get(format!("{}/v1/models", self.base_url))
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .send()
             .map_err(|e| ProviderError::Network(e.to_string()))?;
 
         if !resp.status().is_success() {
+            // Coding plan fallback
+            if self.base_url.contains("minimax") {
+                return Ok(vec![
+                    ModelInfo { id: "MiniMax-M2.5".to_string(), provider: "minimax-coding".to_string() },
+                ]);
+            }
             return Ok(vec![
                 ModelInfo { id: "claude-opus-4-6".to_string(), provider: "anthropic".to_string() },
                 ModelInfo { id: "claude-sonnet-4-6".to_string(), provider: "anthropic".to_string() },
@@ -338,7 +354,12 @@ impl Provider for AnthropicClient {
 pub fn build_provider(name: &str, api_key: &str) -> Option<Box<dyn Provider>> {
     match name {
         "anthropic" => Some(Box::new(AnthropicClient::new(api_key))),
-        "openai" | "openrouter" | "groq" | "opencode" | "deepseek" | "moonshot" | "minimax" => {
+        "minimax-coding" => Some(Box::new(AnthropicClient::with_base_url(
+            "minimax-coding",
+            api_key,
+            "https://api.minimax.io/anthropic",
+        ))),
+        "openai" | "openrouter" | "groq" | "opencode" | "deepseek" | "moonshot" | "minimax" | "zai" | "zai-coding" => {
             OpenAiCompatible::for_provider(name, api_key).map(|p| Box::new(p) as Box<dyn Provider>)
         }
         _ => None,

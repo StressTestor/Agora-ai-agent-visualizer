@@ -25,6 +25,9 @@ const PROVIDER_ENV_VARS: &[(&str, &str)] = &[
     ("deepseek", "DEEPSEEK_API_KEY"),
     ("moonshot", "MOONSHOT_API_KEY"),
     ("minimax", "MINIMAX_API_KEY"),
+    ("minimax-coding", "MINIMAX_CODING_API_KEY"),
+    ("zai", "ZAI_API_KEY"),
+    ("zai-coding", "ZAI_CODING_API_KEY"),
 ];
 
 fn config_path() -> PathBuf {
