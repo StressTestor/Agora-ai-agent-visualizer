@@ -318,6 +318,16 @@ fn get_teams() -> Vec<String> {
 }
 
 #[tauri::command]
+fn delete_team(team: String) -> Result<(), String> {
+    let path = teams_dir().join(&team);
+    if !path.exists() {
+        return Err(format!("team '{team}' not found"));
+    }
+    std::fs::remove_dir_all(&path)
+        .map_err(|e| format!("failed to delete team '{team}': {e}"))
+}
+
+#[tauri::command]
 fn get_messages(state: State<'_, Arc<Mutex<AppState>>>) -> Vec<Message> {
     state.lock().unwrap().messages.clone()
 }
@@ -494,6 +504,7 @@ fn main() {
         .manage(shared_state)
         .invoke_handler(tauri::generate_handler![
                 get_teams,
+                delete_team,
                 get_messages,
                 get_config,
                 save_config,

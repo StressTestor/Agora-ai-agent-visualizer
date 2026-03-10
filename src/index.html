@@ -248,6 +248,7 @@
     <select id="team-select">
       <option value="">all teams</option>
     </select>
+    <button id="btn-delete-team" class="btn-sm" title="delete team" style="display:none;color:#f87171;border-color:#f8717144">×</button>
     <button id="btn-new-debate" class="btn-sm">+ debate</button>
     <input id="search-input" type="text" placeholder="search... (⌘K)">
     <div id="debate-controls">
@@ -560,9 +561,33 @@ function populateTeams(teams) {
   }
 }
 
+const $btnDeleteTeam = document.getElementById('btn-delete-team');
+
 $teamSelect.addEventListener('change', () => {
   currentFilter = $teamSelect.value || null;
+  $btnDeleteTeam.style.display = currentFilter ? '' : 'none';
   applyFilter();
+});
+
+$btnDeleteTeam.addEventListener('click', async () => {
+  if (!currentFilter) return;
+  if (!window.confirm(`delete team "${currentFilter}"?\n\nthis removes the team folder from ~/.claude/teams/ and cannot be undone.`)) return;
+  const { invoke } = window.__TAURI__.core;
+  try {
+    await invoke('delete_team', { team: currentFilter });
+    // Remove from selector
+    const opt = [...$teamSelect.options].find(o => o.value === currentFilter);
+    if (opt) opt.remove();
+    // Remove from messages and reset
+    messages = messages.filter(m => m.team !== currentFilter);
+    currentFilter = null;
+    $teamSelect.value = '';
+    $btnDeleteTeam.style.display = 'none';
+    applyFilter();
+    showToast('team deleted');
+  } catch (err) {
+    showToast(`error: ${err}`);
+  }
 });
 
 // ── Clear ─────────────────────────────────────────────────────
