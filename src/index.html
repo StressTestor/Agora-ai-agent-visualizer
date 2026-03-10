@@ -48,13 +48,6 @@
     pointer-events: none;
   }
 
-  #status-dot {
-    width: 7px; height: 7px; border-radius: 50%;
-    background: #22c55e; box-shadow: 0 0 5px #22c55e88;
-    flex-shrink: 0; transition: background 0.3s;
-  }
-  #status-dot.off { background: var(--muted); box-shadow: none; }
-
   #team-select {
     background: var(--surface); border: 1px solid var(--border);
     color: var(--text); font-family: inherit; font-size: 11px;
@@ -163,12 +156,11 @@
 <div id="app">
 
   <div id="header">
-    <span id="app-name">agora</span>
-    <div id="status-dot" class="off" title="connecting…"></div>
     <select id="team-select">
       <option value="">all teams</option>
     </select>
     <div class="spacer"></div>
+    <span id="app-name">agora</span>
     <button id="btn-clear">clear</button>
   </div>
 
@@ -248,7 +240,6 @@ const knownAgents = new Set();
 const $chat       = document.getElementById('chat');
 const $chips      = document.getElementById('chips');
 const $teamSelect = document.getElementById('team-select');
-const $statusDot  = document.getElementById('status-dot');
 const $msgCount   = document.getElementById('msg-count');
 const $filterStat = document.getElementById('filter-status');
 const $scrollBtn  = document.getElementById('scroll-btn');
@@ -461,7 +452,6 @@ async function init() {
   for (const m of existing) { if (!isIdleNoise(m)) messages.push(m); }
   applyFilter();
 
-  $statusDot.classList.remove('off');
 
   // New message stream
   await listen('new-message', ({ payload: msg }) => {
@@ -492,7 +482,6 @@ function waitForTauri() {
   if (window.__TAURI__) {
     init().catch(err => {
       console.error('init error:', err);
-      $statusDot.classList.add('off');
     });
   } else {
     setTimeout(waitForTauri, 50);
