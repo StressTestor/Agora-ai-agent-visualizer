@@ -1114,14 +1114,54 @@ function renderAgentRow(container, agent, idx) {
     providerSelect.appendChild(opt);
   });
 
+  const datalistId = `model-list-${idx}`;
+  const modelDatalist = document.createElement('datalist');
+  modelDatalist.id = datalistId;
+
   const modelInput = document.createElement('input');
   modelInput.className = 'field-input';
   modelInput.placeholder = 'model ID';
   modelInput.value = agent.model;
   modelInput.dataset.idx = idx;
   modelInput.dataset.field = 'model';
+  modelInput.setAttribute('list', datalistId);
 
-  pmRow.append(providerSelect, modelInput);
+  // Populate datalist when provider changes
+  providerSelect.addEventListener('change', async () => {
+    const pName = providerSelect.value;
+    if (!pName) return;
+    modelDatalist.textContent = '';
+    modelInput.placeholder = 'loading...';
+    try {
+      const { invoke } = window.__TAURI__.core;
+      const models = await invoke('list_models', { providerName: pName });
+      models.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        modelDatalist.appendChild(opt);
+      });
+      modelInput.placeholder = models.length ? 'model ID' : 'model ID (no key configured)';
+    } catch {
+      modelInput.placeholder = 'model ID (enter manually)';
+    }
+  });
+
+  // Pre-populate if provider already set (e.g. from team import)
+  if (agent.provider) {
+    (async () => {
+      try {
+        const { invoke } = window.__TAURI__.core;
+        const models = await invoke('list_models', { providerName: agent.provider });
+        models.forEach(m => {
+          const opt = document.createElement('option');
+          opt.value = m.id;
+          modelDatalist.appendChild(opt);
+        });
+      } catch { /* no key, user types manually */ }
+    })();
+  }
+
+  pmRow.append(providerSelect, modelInput, modelDatalist);
 
   const roleRow = document.createElement('div');
   roleRow.className = 'field-row';
