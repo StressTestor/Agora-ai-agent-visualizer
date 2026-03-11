@@ -108,6 +108,7 @@ impl OpenAiCompatible {
             "minimax" => "https://api.minimaxi.chat/v1",
             "zai" => "https://api.z.ai/api/paas/v4",
             "zai-coding" => "https://api.z.ai/api/coding/paas/v4",
+            "gemini" => "https://generativelanguage.googleapis.com/v1beta/openai",
             _ => return None,
         };
         Some(Self::new(name, base_url, api_key))
@@ -139,22 +140,31 @@ impl Provider for OpenAiCompatible {
             return Err(ProviderError::Auth("invalid API key".to_string()));
         }
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(ProviderError::RateLimit("rate limited".to_string()));
+            let retry_after = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            return Err(ProviderError::RateLimit(retry_after.to_string()));
         }
         if !status.is_success() {
             let text = resp.text().unwrap_or_default();
             return Err(ProviderError::Other(format!("HTTP {status}: {text}")));
         }
 
-        let parsed: OpenAiResponse = resp
-            .json()
-            .map_err(|e| ProviderError::Other(format!("failed to parse response: {e}")))?;
+        let body = resp
+            .text()
+            .map_err(|e| ProviderError::Other(format!("failed to read response body: {e}")))?;
+
+        let parsed: OpenAiResponse = serde_json::from_str(&body)
+            .map_err(|e| ProviderError::Other(format!("failed to parse response: {e} | body: {body}")))?;
 
         parsed
             .choices
             .first()
             .map(|c| c.message.content.clone())
-            .ok_or_else(|| ProviderError::Other("no choices in response".to_string()))
+            .ok_or_else(|| ProviderError::Other(format!("no choices in response | body: {body}")))
     }
 
     fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
@@ -221,6 +231,9 @@ struct AnthropicResponse {
 
 #[derive(Deserialize)]
 struct AnthropicContent {
+    #[serde(rename = "type")]
+    content_type: String,
+    #[serde(default)]
     text: String,
 }
 
@@ -291,7 +304,13 @@ impl Provider for AnthropicClient {
             return Err(ProviderError::Auth("invalid API key".to_string()));
         }
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(ProviderError::RateLimit("rate limited".to_string()));
+            let retry_after = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            return Err(ProviderError::RateLimit(retry_after.to_string()));
         }
         if !status.is_success() {
             let text = resp.text().unwrap_or_default();
@@ -304,8 +323,9 @@ impl Provider for AnthropicClient {
 
         parsed
             .content
-            .first()
-            .map(|c| c.text.clone())
+            .into_iter()
+            .find(|c| c.content_type == "text")
+            .map(|c| c.text)
             .ok_or_else(|| ProviderError::Other("no content in response".to_string()))
     }
 
@@ -359,7 +379,7 @@ pub fn build_provider(name: &str, api_key: &str) -> Option<Box<dyn Provider>> {
             api_key,
             "https://api.minimax.io/anthropic",
         ))),
-        "openai" | "openrouter" | "groq" | "opencode" | "deepseek" | "moonshot" | "minimax" | "zai" | "zai-coding" => {
+        "openai" | "openrouter" | "groq" | "opencode" | "deepseek" | "moonshot" | "minimax" | "zai" | "zai-coding" | "gemini" => {
             OpenAiCompatible::for_provider(name, api_key).map(|p| Box::new(p) as Box<dyn Provider>)
         }
         _ => None,
