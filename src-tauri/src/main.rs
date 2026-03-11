@@ -15,7 +15,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -419,6 +419,54 @@ fn create_debate(
     config: DebateConfig,
 ) -> Result<String, String> {
     let team = config.team_name.clone();
+
+    // Archive existing inbox messages for this team so the new debate
+    // starts clean while old logs are preserved for reference.
+    let team_dir = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
+        .join(".claude")
+        .join("teams")
+        .join(&team);
+    let inbox_dir = team_dir.join("inboxes");
+    if inbox_dir.exists() {
+        let has_json = std::fs::read_dir(&inbox_dir)
+            .ok()
+            .map(|mut e| e.any(|f| f.ok().map(|f| f.path().extension().map(|x| x == "json").unwrap_or(false)).unwrap_or(false)))
+            .unwrap_or(false);
+        if has_json {
+            // Name the archive folder after the debate topic (slugified),
+            // with a numeric suffix if that folder already exists.
+            let topic_raw = config.topics.first().map(String::as_str).unwrap_or("debate");
+            let slug: String = topic_raw
+                .chars()
+                .map(|c| if c.is_alphanumeric() || c == '-' { c.to_ascii_lowercase() } else { '-' })
+                .collect::<String>()
+                .split('-')
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("-");
+            let slug = if slug.is_empty() { "debate".to_string() } else { slug };
+            let archive_base = team_dir.join("archive");
+            let mut archive_dir = archive_base.join(&slug);
+            let mut n = 2u32;
+            while archive_dir.exists() {
+                archive_dir = archive_base.join(format!("{slug}-{n}"));
+                n += 1;
+            }
+            let archive_dir = archive_dir;
+            let _ = std::fs::create_dir_all(&archive_dir);
+            if let Ok(entries) = std::fs::read_dir(&inbox_dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.extension().map(|e| e == "json").unwrap_or(false) {
+                        if let Some(fname) = p.file_name() {
+                            let _ = std::fs::rename(&p, archive_dir.join(fname));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let debate_state = Arc::new(Mutex::new(DebateState::new(config)));
     let mut st = state.lock().unwrap();
     st.debates.insert(team.clone(), debate_state);
@@ -483,6 +531,34 @@ fn pause_debate(
 }
 
 #[tauri::command]
+fn restart_debate(
+    app: AppHandle,
+    state: State<'_, Arc<Mutex<AppState>>>,
+    team: String,
+) -> Result<(), String> {
+    let (debate_state, app_config) = {
+        let st = state.lock().unwrap();
+        let ds = st
+            .debates
+            .get(&team)
+            .ok_or_else(|| format!("no debate '{team}'"))?
+            .clone();
+        (ds, st.config.clone())
+    };
+    // Reset state for a fresh run
+    {
+        let mut d = debate_state.lock().unwrap();
+        d.messages.clear();
+        d.current_round = 0;
+        d.current_agent_idx = 0;
+        d.current_topic_idx = 0;
+        d.status = orchestrator::DebateStatus::Running;
+    }
+    orchestrator::start_debate(app, app_config, debate_state);
+    Ok(())
+}
+
+#[tauri::command]
 fn get_debate_status(
     state: State<'_, Arc<Mutex<AppState>>>,
     team: String,
@@ -493,19 +569,31 @@ fn get_debate_status(
         .get(&team)
         .ok_or_else(|| format!("no debate '{team}'"))?;
     let debate = ds.lock().unwrap();
-    let status_str = match &debate.status {
-        orchestrator::DebateStatus::Running => "running",
-        orchestrator::DebateStatus::Paused => "paused",
-        orchestrator::DebateStatus::Stopped => "stopped",
-        orchestrator::DebateStatus::Converged => "converged",
-        orchestrator::DebateStatus::Error(_) => "error",
+    let (status_str, error_msg) = match &debate.status {
+        orchestrator::DebateStatus::Running => ("running", None),
+        orchestrator::DebateStatus::Paused => ("paused", None),
+        orchestrator::DebateStatus::Stopped => ("stopped", None),
+        orchestrator::DebateStatus::Converged => ("converged", None),
+        orchestrator::DebateStatus::Error(e) => ("error", Some(e.clone())),
     };
     Ok(orchestrator::DebateStatusEvent {
         team: debate.config.team_name.clone(),
         status: status_str.to_string(),
         round: debate.current_round,
         total_messages: debate.messages.len(),
+        error_msg,
     })
+}
+
+#[tauri::command]
+fn show_main_and_close_splash(app: AppHandle) {
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.show();
+        let _ = main.set_focus();
+    }
+    if let Some(splash) = app.get_webview_window("splash") {
+        let _ = tauri::WebviewWindow::close(&splash);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -556,12 +644,27 @@ fn main() {
                 start_debate_cmd,
                 stop_debate,
                 pause_debate,
+                restart_debate,
                 get_debate_status,
+                show_main_and_close_splash,
             ])
         .setup(move |app| {
             let handle: AppHandle = app.handle().clone();
             let state = state_for_setup.clone();
             let initial_team = cli_team.clone();
+
+            // Hide main window and show splash over it
+            if let Some(main) = app.get_webview_window("main") {
+                let _ = main.hide();
+            }
+            let _ = tauri::WebviewWindowBuilder::new(app, "splash", tauri::WebviewUrl::App("splash.html".into()))
+                .title("")
+                .inner_size(464.0, 688.0)
+                .decorations(false)
+                .resizable(false)
+                .center()
+                .always_on_top(true)
+                .build();
 
             // Initial scan on the calling thread (fast)
             {
