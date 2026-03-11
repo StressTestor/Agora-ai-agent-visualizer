@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agora</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100vw; height: 100vh;
+    background: #000;
+    overflow: hidden;
+    -webkit-app-region: drag;
+  }
+  video {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100vw; height: 100vh;
+    object-fit: fill;
+  }
+</style>
+</head>
+<body>
+<video id="v" autoplay muted playsinline>
+  <source src="agora-intro.mp4" type="video/mp4">
+</video>
+<script>
+const video = document.getElementById('v');
+
+async function done() {
+  const { invoke } = window.__TAURI__.core;
+  await invoke('show_main_and_close_splash');
+}
+
+video.addEventListener('ended', done);
+video.addEventListener('error', done);
+document.addEventListener('click', done);
+setTimeout(done, 8000);
+</script>
+</body>
+</html>
