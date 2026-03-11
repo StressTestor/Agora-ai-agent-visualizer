@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>agora</title>
+<title>Agora</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -123,10 +123,16 @@
   .msg-body {
     font-size: 11px; color: var(--text); padding-left: 24px;
     white-space: pre-wrap; word-break: break-word;
-    max-height: 200px; overflow: hidden; cursor: pointer;
     transition: max-height 0.2s;
   }
-  .msg-body.expanded { max-height: none; }
+  .msg-body.collapsed { max-height: 200px; overflow: hidden; }
+  .msg-collapse-btn {
+    display: block; margin-left: 24px; margin-top: 4px;
+    background: none; border: none; padding: 0;
+    font-size: 9px; color: var(--muted); cursor: pointer;
+    font-family: inherit;
+  }
+  .msg-collapse-btn:hover { color: var(--text); }
   .msg-body code { background: var(--code-bg); border-radius: 3px; padding: 0 3px; font-size: 10px; }
   .msg-body strong { font-weight: 700; }
   .msg-body em { font-style: italic; color: #b0bec5; }
@@ -231,6 +237,55 @@
   #debate-status-dot.error { background: #f87171; animation: none; }
   @keyframes pulse-status { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 
+  /* Authority messages */
+  .msg-authority {
+    background: color-mix(in srgb, var(--amber) 5%, var(--surface));
+  }
+  .authority-badge {
+    display: inline-block;
+    margin-left: 5px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    background: color-mix(in srgb, var(--amber) 20%, transparent);
+    color: var(--amber);
+    border: 1px solid color-mix(in srgb, var(--amber) 40%, transparent);
+    vertical-align: middle;
+  }
+
+  /* Thinking bubble */
+  .thinking-bubble {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; margin: 0; border-radius: 6px;
+    border-left: 3px solid var(--border);
+  }
+  .thinking-avatar {
+    width: 22px; height: 22px; border-radius: 4px;
+    font-size: 9px; font-weight: 600; letter-spacing: 0.02em;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .thinking-name {
+    font-size: 11px; font-weight: 600; opacity: 0.85;
+  }
+  .thinking-dots {
+    display: flex; gap: 4px; align-items: center; margin-left: 2px;
+  }
+  .thinking-dots span {
+    width: 5px; height: 5px; border-radius: 50%;
+    background: var(--muted); display: inline-block;
+    animation: thinking-bounce 1.2s infinite ease-in-out;
+  }
+  .thinking-dots span:nth-child(1) { animation-delay: 0s; }
+  .thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
+  .thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes thinking-bounce {
+    0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+    30% { transform: translateY(-4px); opacity: 1; }
+  }
+
   /* Toast */
   #toast {
     position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%);
@@ -257,12 +312,13 @@
       <span id="debate-round-text"></span>
       <button class="btn-sm" id="btn-pause" title="pause/resume">⏸</button>
       <button class="btn-sm" id="btn-stop" title="stop">⏹</button>
+      <button class="btn-sm" id="btn-restart" title="restart">⟳</button>
     </div>
     <div class="spacer"></div>
     <button id="btn-clear">clear</button>
     <button id="btn-settings" class="btn-sm" title="settings">⚙</button>
   </div>
-  <span id="app-name">agora</span>
+  <span id="app-name">Agora</span>
 
   <div id="chips"></div>
 
@@ -391,7 +447,7 @@ $scrollBtn.addEventListener('click', () => {
 });
 
 function maybeScroll() {
-  if (autoScroll) $chat.scrollTop = $chat.scrollHeight;
+  $chat.scrollTop = $chat.scrollHeight;
 }
 
 // ── Chip bar ──────────────────────────────────────────────────
@@ -415,6 +471,13 @@ function ensureChip(name) {
   $chips.appendChild(chip);
 }
 
+const AUTHORITY_ROLES = new Set(['moderator','synthesizer','arbiter','mediator','judge','facilitator']);
+function isAuthority(role) {
+  if (!role) return false;
+  const r = role.toLowerCase();
+  return AUTHORITY_ROLES.has(r) || [...AUTHORITY_ROLES].some(ar => r.includes(ar));
+}
+
 // ── Message rendering (DOM construction — no innerHTML with user data) ─────
 function buildMessageNode(msg) {
   const fromColor = agentColor(msg.from);
@@ -423,9 +486,11 @@ function buildMessageNode(msg) {
   ensureChip(msg.from);
   ensureChip(msg.to);
 
+  const authority = isAuthority(msg.role);
   const row = document.createElement('div');
-  row.className = 'msg';
-  row.style.borderLeftColor = fromColor + '80';
+  row.className = authority ? 'msg msg-authority' : 'msg';
+  row.style.borderLeftColor = authority ? 'var(--amber)' : fromColor + '80';
+  if (authority) row.style.borderLeftWidth = '3px';
 
   // — Meta row —
   const meta = document.createElement('div');
@@ -441,6 +506,13 @@ function buildMessageNode(msg) {
   route.className  = 'msg-route';
   route.style.color = fromColor;
   route.textContent = msg.from;
+
+  if (authority) {
+    const badge = document.createElement('span');
+    badge.className = 'authority-badge';
+    badge.textContent = msg.role || 'authority';
+    route.appendChild(badge);
+  }
 
   const arrow = document.createElement('span');
   arrow.className  = 'msg-arrow';
@@ -469,9 +541,16 @@ function buildMessageNode(msg) {
   const body = document.createElement('div');
   body.className = 'msg-body';
   body.innerHTML = renderMd(msg.content);   // safe: esc() runs first
-  body.addEventListener('click', () => body.classList.toggle('expanded'));
 
-  row.append(meta, body);
+  const collapseBtn = document.createElement('button');
+  collapseBtn.className = 'msg-collapse-btn';
+  collapseBtn.textContent = '▲ collapse';
+  collapseBtn.addEventListener('click', () => {
+    const collapsed = body.classList.toggle('collapsed');
+    collapseBtn.textContent = collapsed ? '▼ expand' : '▲ collapse';
+  });
+
+  row.append(meta, body, collapseBtn);
   return row;
 }
 
@@ -494,6 +573,46 @@ function appendMessage(msg) {
   $empty.style.display = 'none';
   $chat.appendChild(buildMessageNode(msg));
   maybeScroll();
+}
+
+// ── Thinking bubble ───────────────────────────────────────────
+let $thinkingNode = null;
+let thinkingAgent = null;
+
+function showThinking(agentName, teamName) {
+  clearThinking();
+  if (currentFilter && teamName !== currentFilter) return;
+
+  const color = agentColor(agentName);
+  const row = document.createElement('div');
+  row.className = 'thinking-bubble';
+  row.style.borderLeftColor = color + '80';
+
+  const avatar = document.createElement('span');
+  avatar.className = 'thinking-avatar';
+  avatar.style.background = color + '22';
+  avatar.style.color = color;
+  avatar.textContent = initials(agentName);
+
+  const name = document.createElement('span');
+  name.className = 'thinking-name';
+  name.style.color = color;
+  name.textContent = agentName;
+
+  const dots = document.createElement('span');
+  dots.className = 'thinking-dots';
+  dots.innerHTML = '<span></span><span></span><span></span>';
+
+  row.append(avatar, name, dots);
+  $chat.appendChild(row);
+  maybeScroll();
+
+  $thinkingNode = row;
+  thinkingAgent = agentName;
+}
+
+function clearThinking() {
+  if ($thinkingNode) { $thinkingNode.remove(); $thinkingNode = null; thinkingAgent = null; }
 }
 
 function buildSystemNode(text) {
@@ -660,9 +779,15 @@ async function init() {
   applyFilter();
 
 
+  // Thinking indicator
+  await listen('debate-thinking', ({ payload }) => {
+    showThinking(payload.agent, payload.team);
+  });
+
   // New message stream
   await listen('new-message', ({ payload: msg }) => {
     if (isIdleNoise(msg)) return;
+    clearThinking();
     messages.push(msg);
     if (!currentFilter || msg.team === currentFilter) {
       $empty.style.display = 'none';
@@ -719,7 +844,7 @@ function showToast(msg) {
 // ── Settings panel ───────────────────────────────────────────
 const $settingsOverlay = document.getElementById('settings-overlay');
 const $settingsProviders = document.getElementById('settings-providers');
-const PROVIDERS = ['openai', 'openrouter', 'groq', 'opencode', 'anthropic', 'deepseek', 'moonshot', 'minimax', 'minimax-coding', 'zai', 'zai-coding'];
+const PROVIDERS = ['openai', 'openrouter', 'groq', 'opencode', 'anthropic', 'gemini', 'deepseek', 'moonshot', 'minimax', 'minimax-coding', 'zai', 'zai-coding'];
 const PROVIDER_LABELS = { 'opencode': 'opencode zen', 'minimax-coding': 'minimax (coding plan)', 'zai-coding': 'z.ai (coding plan)' };
 const providerLabel = p => PROVIDER_LABELS[p] || p;
 
@@ -772,6 +897,7 @@ async function loadSettings() {
       try {
         await saveCurrentSettings();
         const models = await invoke('list_models', { providerName: name });
+        modelListCache[name] = models; // refresh cache on explicit test
         dot.className = 'status-dot ok';
         testBtn.textContent = `✓ ${models.length}`;
         setTimeout(() => { testBtn.textContent = 'test'; }, 2000);
@@ -822,6 +948,7 @@ let wizardState = {
 
 let cachedPresets = [];
 let cachedRoles = [];
+const modelListCache = {}; // provider -> models[], persists for session
 
 document.getElementById('btn-new-debate').addEventListener('click', () => {
   wizardState = {
@@ -1019,13 +1146,14 @@ async function renderStep1() {
 function inferProvider(model) {
   if (!model) return '';
   if (model.startsWith('claude-')) return 'anthropic';
+  if (model.startsWith('gemini-')) return 'gemini';
   if (model.startsWith('gpt-') || model.startsWith('o1') || model.startsWith('o3')) return 'openai';
   if (model.startsWith('deepseek-')) return 'deepseek';
   if (model.startsWith('moonshot-') || model.startsWith('kimi-')) return 'moonshot';
   if (model.startsWith('MiniMax-M2') || model === 'MiniMax-M2.5') return 'minimax-coding';
+  if (model.includes('/')) return 'openrouter';
   if (model.startsWith('glm-')) return 'zai';
   if (model.startsWith('MiniMax-') || model.startsWith('minimax-') || model.startsWith('abab')) return 'minimax';
-  if (model.includes('/')) return 'openrouter';
   return '';
 }
 
@@ -1123,26 +1251,73 @@ function renderAgentRow(container, agent, idx) {
   modelInput.dataset.idx = idx;
   modelInput.dataset.field = 'model';
 
-  function makeModelSelect(models, currentValue) {
+  function isFreeModel(id) {
+    return id.endsWith(':free') || id.includes(':free-');
+  }
+
+  function modelLabel(id, pName) {
+    if (pName === 'openrouter') {
+      const slash = id.indexOf('/');
+      if (slash !== -1) {
+        const vendor = id.slice(0, slash);
+        const model  = id.slice(slash + 1);
+        return `${model}  [${vendor}]`;
+      }
+    }
+    return id;
+  }
+
+  function makeModelSelect(models, currentValue, pName) {
+    const free = models
+      .filter(m => isFreeModel(m.id))
+      .sort((a, b) => modelLabel(a.id, pName).localeCompare(modelLabel(b.id, pName)));
+    const paid = models
+      .filter(m => !isFreeModel(m.id))
+      .sort((a, b) => modelLabel(a.id, pName).localeCompare(modelLabel(b.id, pName)));
+
     const sel = document.createElement('select');
     sel.className = 'field-input';
     sel.dataset.idx = idx;
     sel.dataset.field = 'model';
+
     const blank = document.createElement('option');
     blank.value = '';
     blank.textContent = '— select model —';
     sel.appendChild(blank);
-    models.forEach(m => {
-      const opt = document.createElement('option');
-      opt.value = m.id;
-      opt.textContent = m.id;
-      if (currentValue === m.id) opt.selected = true;
-      sel.appendChild(opt);
-    });
+
+    function addGroup(label, items) {
+      if (!items.length) return;
+      const grp = document.createElement('optgroup');
+      grp.label = label;
+      items.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = modelLabel(m.id, pName);
+        if (currentValue === m.id) opt.selected = true;
+        grp.appendChild(opt);
+      });
+      sel.appendChild(grp);
+    }
+
+    addGroup('free', free);
+    addGroup('paid', paid);
+
+    // if models had no free/paid split, render flat
+    if (!free.length && !paid.length) {
+      models.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = modelLabel(m.id, pName);
+        if (currentValue === m.id) opt.selected = true;
+        sel.appendChild(opt);
+      });
+    }
+
     const manualOpt = document.createElement('option');
     manualOpt.value = '__manual__';
     manualOpt.textContent = 'enter manually...';
     sel.appendChild(manualOpt);
+
     sel.addEventListener('change', () => {
       if (sel.value === '__manual__') {
         const inp = document.createElement('input');
@@ -1162,9 +1337,12 @@ function renderAgentRow(container, agent, idx) {
     currentEl.placeholder = 'loading...';
     try {
       const { invoke } = window.__TAURI__.core;
-      const models = await invoke('list_models', { providerName: pName });
+      if (!modelListCache[pName]) {
+        modelListCache[pName] = await invoke('list_models', { providerName: pName });
+      }
+      const models = modelListCache[pName];
       if (models.length > 0) {
-        const sel = makeModelSelect(models, currentValue);
+        const sel = makeModelSelect(models, currentValue, pName);
         currentEl.replaceWith(sel);
       } else {
         currentEl.placeholder = 'model ID (no key configured)';
@@ -1402,6 +1580,7 @@ async function launchDebate() {
         provider: a.provider,
         model: a.model,
         system_prompt: a.system_prompt,
+        role: a.role || '',
       })),
       topics: topicList,
       visibility: wizardState.visibility,
@@ -1412,6 +1591,10 @@ async function launchDebate() {
 
     await invoke('create_debate', { config: debateConfig });
     await invoke('start_debate_cmd', { team: wizardState.teamName });
+
+    // Drop prior messages for this team from memory so the new debate starts clean.
+    // Old messages are archived on disk at ~/.claude/teams/{team}/archive/.
+    messages = messages.filter(m => m.team !== wizardState.teamName);
 
     populateTeams([wizardState.teamName]);
     $teamSelect.value = wizardState.teamName;
@@ -1444,8 +1627,13 @@ async function initDebateControls() {
     $debateStatusText.textContent = payload.status;
     $debateRoundText.textContent = payload.round > 0 ? `· round ${payload.round}` : '';
 
+    if (payload.status === 'error' && payload.error_msg) {
+      $debateRoundText.textContent += ` · ${payload.error_msg}`;
+    }
+
     if (payload.status === 'stopped' || payload.status === 'converged' || payload.status === 'error') {
       document.getElementById('btn-pause').textContent = '⏸';
+      clearThinking();
     }
   });
 }
@@ -1468,6 +1656,20 @@ document.getElementById('btn-stop').addEventListener('click', async () => {
   try {
     await invoke('stop_debate', { team: activeDebateTeam });
     showToast('debate stopped');
+  } catch (err) {
+    showToast(`error: ${err}`);
+  }
+});
+
+document.getElementById('btn-restart').addEventListener('click', async () => {
+  if (!activeDebateTeam) return;
+  const { invoke } = window.__TAURI__.core;
+  try {
+    messages = messages.filter(m => m.team !== activeDebateTeam);
+    applyFilter();
+    await invoke('restart_debate', { team: activeDebateTeam });
+    document.getElementById('btn-pause').textContent = '⏸';
+    showToast('debate restarted');
   } catch (err) {
     showToast(`error: ${err}`);
   }
