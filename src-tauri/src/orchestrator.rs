@@ -1,6 +1,7 @@
 use crate::config::AppConfig;
 use crate::provider::{self, ChatMessage, Provider};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
@@ -15,6 +16,8 @@ pub struct AgentConfig {
     pub provider: String,
     pub model: String,
     pub system_prompt: String,
+    #[serde(default)]
+    pub role: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +47,14 @@ pub struct DebateMessage {
     pub content: String,
     pub timestamp: u64,
     pub team: String,
+    #[serde(default)]
+    pub role: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DebateThinkingEvent {
+    pub team: String,
+    pub agent: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +63,8 @@ pub struct DebateStatusEvent {
     pub status: String,
     pub round: u32,
     pub total_messages: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_msg: Option<String>,
 }
 
 pub struct DebateState {
@@ -84,22 +97,144 @@ fn now_ms() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// Hidden debate protocol
+// ---------------------------------------------------------------------------
+
+const AUTHORITY_ROLES: &[&str] = &[
+    "moderator", "synthesizer", "arbiter", "mediator", "judge", "facilitator",
+];
+
+fn is_authority_role(role: &str) -> bool {
+    let r = role.to_lowercase();
+    AUTHORITY_ROLES.iter().any(|ar| r == *ar || r.contains(ar))
+}
+
+fn hidden_debate_instructions(
+    agent: &AgentConfig,
+    all_agents: &[AgentConfig],
+    my_turn_count: usize,
+) -> String {
+    let authority: Vec<&str> = all_agents
+        .iter()
+        .filter(|a| is_authority_role(&a.role) && a.name != agent.name)
+        .map(|a| a.name.as_str())
+        .collect();
+
+    let participant_names: Vec<&str> = all_agents
+        .iter()
+        .filter(|a| a.name != agent.name)
+        .map(|a| a.name.as_str())
+        .collect();
+
+    let full_context_check = my_turn_count % 2 == 0;
+
+    let mut lines = vec![
+        String::from("--- debate protocol (hidden from user) ---"),
+        format!(
+            "you are {} in a structured multi-agent debate. other participants: {}.",
+            agent.name,
+            if participant_names.is_empty() { "none".to_string() } else { participant_names.join(", ") }
+        ),
+        String::new(),
+        String::from("context: the full conversation history is provided above. always read it before responding."),
+        String::new(),
+        String::from("rules:"),
+        String::from("- respond directly to the most recent message before introducing new points"),
+        String::from("- be specific — cite evidence, name tradeoffs, give examples. no hand-waving"),
+        String::from("- when you concede a point, say so explicitly (\"i concede\", \"you're right\", \"agreed\")"),
+        String::from("- don't repeat arguments that have already been conceded or resolved"),
+        String::from("- address other agents by name when responding to a specific argument"),
+    ];
+
+    if full_context_check {
+        lines.push(String::new());
+        lines.push(format!(
+            "full-context checkpoint (turn {}): before writing your response, scan the entire conversation above. identify: (1) any points that were conceded or resolved earlier that are being relitigated, (2) arguments you or others made in earlier turns that are now contradicted, (3) any direction from an authority agent you haven't acknowledged yet. your response must be grounded in the full thread, not just the last message.",
+            my_turn_count + 1
+        ));
+    }
+
+    if !authority.is_empty() {
+        lines.push(String::new());
+        lines.push(format!(
+            "authority: {} hold directive authority in this debate. when they issue a direction, call for convergence, or declare a point resolved — comply, or clearly state your remaining objection in one sentence. do not re-litigate settled points.",
+            authority.join(" and ")
+        ));
+    }
+
+    if is_authority_role(&agent.role) {
+        lines.push(String::new());
+        lines.push(String::from(
+            "as an authority agent: monitor the debate for circular arguments and unproductive repetition. call them out directly. when the debate has produced enough signal on a point, declare it resolved and move on. your directives are binding — enforce them.",
+        ));
+    }
+
+    lines.push(String::from("--- end protocol ---"));
+    lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
 // Context building
 // ---------------------------------------------------------------------------
 
+/// Merge consecutive messages with the same role (required by Anthropic) and
+/// ensure at least one user message exists before any assistant message.
+fn normalize_context(context: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    // Separate system messages; we'll re-prepend them at the end
+    let (system_msgs, conv_msgs): (Vec<ChatMessage>, Vec<ChatMessage>) =
+        context.into_iter().partition(|m| m.role == "system");
+
+    // Merge consecutive same-role messages by concatenating content
+    let mut merged: Vec<ChatMessage> = vec![];
+    for msg in conv_msgs {
+        if let Some(last) = merged.last_mut() {
+            if last.role == msg.role {
+                last.content.push_str("\n\n");
+                last.content.push_str(&msg.content);
+                continue;
+            }
+        }
+        merged.push(msg);
+    }
+
+    // Ensure conversation starts with a user message
+    if merged.is_empty() {
+        merged.push(ChatMessage {
+            role: "user".to_string(),
+            content: "Begin the debate. Share your opening argument on the topic.".to_string(),
+        });
+    } else if merged[0].role != "user" {
+        merged.insert(
+            0,
+            ChatMessage {
+                role: "user".to_string(),
+                content: "Continue the debate.".to_string(),
+            },
+        );
+    }
+
+    let mut result = system_msgs;
+    result.extend(merged);
+    result
+}
+
 fn build_context(state: &DebateState, agent: &AgentConfig) -> Vec<ChatMessage> {
+    // Count how many times this agent has spoken so far (0-indexed turn count)
+    let my_turn_count = state.messages.iter().filter(|m| m.from == agent.name).count();
+
+    let hidden = hidden_debate_instructions(agent, &state.config.agents, my_turn_count);
+
+    // Embed topic + hidden protocol in system prompt
+    let system_content = if let Some(topic) = state.config.topics.get(state.current_topic_idx) {
+        format!("{}\n\ncurrent debate topic: {topic}\n\n{hidden}", agent.system_prompt)
+    } else {
+        format!("{}\n\n{hidden}", agent.system_prompt)
+    };
+
     let mut context = vec![ChatMessage {
         role: "system".to_string(),
-        content: agent.system_prompt.clone(),
+        content: system_content,
     }];
-
-    // Add current topic as the first user message
-    if let Some(topic) = state.config.topics.get(state.current_topic_idx) {
-        context.push(ChatMessage {
-            role: "user".to_string(),
-            content: format!("debate topic: {topic}"),
-        });
-    }
 
     // Add conversation history based on visibility mode
     let history: Vec<&DebateMessage> = match state.config.visibility.as_str() {
@@ -128,7 +263,7 @@ fn build_context(state: &DebateState, agent: &AgentConfig) -> Vec<ChatMessage> {
         });
     }
 
-    context
+    normalize_context(context)
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +309,75 @@ fn check_convergence(state: &DebateState) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Disk persistence helpers
+// ---------------------------------------------------------------------------
+
+fn home_dir() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
+}
+
+fn team_inbox_dir(team: &str) -> PathBuf {
+    home_dir()
+        .join(".claude")
+        .join("teams")
+        .join(team)
+        .join("inboxes")
+}
+
+fn safe_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect()
+}
+
+/// Write the team config.json and create the inboxes directory so watch mode
+/// picks it up immediately.
+fn init_team_on_disk(config: &DebateConfig) {
+    let team_dir = home_dir()
+        .join(".claude")
+        .join("teams")
+        .join(&config.team_name);
+    let _ = std::fs::create_dir_all(team_dir.join("inboxes"));
+
+    let team_cfg = serde_json::json!({
+        "name": config.team_name,
+        "description": format!("debate: {}", config.topics.first().map(String::as_str).unwrap_or("general")),
+        "members": config.agents.iter().map(|a| serde_json::json!({
+            "name": a.name,
+            "model": a.model,
+        })).collect::<Vec<_>>(),
+    });
+    if let Ok(json) = serde_json::to_string_pretty(&team_cfg) {
+        let _ = std::fs::write(team_dir.join("config.json"), json);
+    }
+}
+
+/// Append a message to ~/.claude/teams/{team}/inboxes/{to}.json
+fn persist_message(msg: &DebateMessage) {
+    let inbox_dir = team_inbox_dir(&msg.team);
+    let _ = std::fs::create_dir_all(&inbox_dir);
+
+    let path = inbox_dir.join(format!("{}.json", safe_filename(&msg.to)));
+
+    let mut arr: Vec<serde_json::Value> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    arr.push(serde_json::json!({
+        "from": msg.from,
+        "to":        msg.to,
+        "text":      msg.content,
+        "timestamp": msg.timestamp,
+        "role":      msg.role,
+    }));
+
+    if let Ok(json) = serde_json::to_string_pretty(&arr) {
+        let _ = std::fs::write(&path, json);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Orchestrator loop
 // ---------------------------------------------------------------------------
 
@@ -183,6 +387,12 @@ pub fn start_debate(
     debate_state: Arc<Mutex<DebateState>>,
 ) {
     std::thread::spawn(move || {
+        // Create team on disk so watch mode picks it up immediately
+        {
+            let state = debate_state.lock().unwrap();
+            init_team_on_disk(&state.config);
+        }
+
         // Build providers for each agent
         let providers: Vec<Option<Box<dyn Provider>>> = {
             let state = debate_state.lock().unwrap();
@@ -205,7 +415,7 @@ pub fn start_debate(
             emit_status(&handle, &state);
         }
 
-        loop {
+        'debate: loop {
             let (agent_idx, agent_config, team_name, visibility);
             {
                 let state = debate_state.lock().unwrap();
@@ -260,24 +470,40 @@ pub fn start_debate(
                 }
             };
 
-            let response = match provider.chat(&context, &agent_config.model) {
-                Ok(text) => text,
-                Err(_) => {
-                    // Retry once
-                    std::thread::sleep(std::time::Duration::from_secs(1));
+            // Signal to frontend that this agent is waiting for a response
+            let _ = handle.emit("debate-thinking", DebateThinkingEvent {
+                team: team_name.clone(),
+                agent: agent_config.name.clone(),
+            });
+
+            let response = 'call: {
+                let mut last_err = None;
+                for attempt in 0..4u32 {
                     match provider.chat(&context, &agent_config.model) {
-                        Ok(text) => text,
-                        Err(e2) => {
-                            let mut state = debate_state.lock().unwrap();
-                            state.status = DebateStatus::Error(format!(
-                                "agent '{}' failed after retry: {e2}",
-                                agent_config.name
-                            ));
-                            emit_status(&handle, &state);
-                            break;
+                        Ok(text) => break 'call text,
+                        Err(e) => {
+                            let delay = match &e {
+                                provider::ProviderError::RateLimit(s) => {
+                                    // use Retry-After if provider sent one, else 60s floor
+                                    s.parse::<u64>().unwrap_or(0).max(60)
+                                }
+                                _ => 2u64.pow(attempt),
+                            };
+                            last_err = Some(e);
+                            if attempt < 3 {
+                                std::thread::sleep(std::time::Duration::from_secs(delay));
+                            }
                         }
                     }
                 }
+                let mut state = debate_state.lock().unwrap();
+                state.status = DebateStatus::Error(format!(
+                    "agent '{}' failed: {}",
+                    agent_config.name,
+                    last_err.unwrap()
+                ));
+                emit_status(&handle, &state);
+                break 'debate;
             };
 
             // Determine "to" field
@@ -302,9 +528,11 @@ pub fn start_debate(
                 content: response,
                 timestamp: now_ms(),
                 team: team_name.clone(),
+                role: agent_config.role.clone(),
             };
 
-            let _ = handle.emit("new-message", &msg);
+            // Persist to disk — file watcher delivers to frontend (dedup safe)
+            persist_message(&msg);
 
             {
                 let mut state = debate_state.lock().unwrap();
@@ -325,8 +553,9 @@ pub fn start_debate(
                                 content: format!("moving to next topic: {topic}"),
                                 timestamp: now_ms(),
                                 team: team_name.clone(),
+                                role: "system".to_string(),
                             };
-                            let _ = handle.emit("new-message", &topic_msg);
+                            persist_message(&topic_msg);
                             state.messages.push(topic_msg);
                         }
                     }
@@ -342,12 +571,12 @@ pub fn start_debate(
 }
 
 fn emit_status(handle: &AppHandle, state: &DebateState) {
-    let status_str = match &state.status {
-        DebateStatus::Running => "running",
-        DebateStatus::Paused => "paused",
-        DebateStatus::Stopped => "stopped",
-        DebateStatus::Converged => "converged",
-        DebateStatus::Error(_) => "error",
+    let (status_str, error_msg) = match &state.status {
+        DebateStatus::Running => ("running", None),
+        DebateStatus::Paused => ("paused", None),
+        DebateStatus::Stopped => ("stopped", None),
+        DebateStatus::Converged => ("converged", None),
+        DebateStatus::Error(e) => ("error", Some(e.clone())),
     };
     let _ = handle.emit(
         "debate-status",
@@ -356,6 +585,7 @@ fn emit_status(handle: &AppHandle, state: &DebateState) {
             status: status_str.to_string(),
             round: state.current_round,
             total_messages: state.messages.len(),
+            error_msg,
         },
     );
 }
