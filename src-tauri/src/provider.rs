@@ -1,4 +1,5 @@
 use std::io::BufRead;
+use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -644,9 +645,29 @@ impl Provider for ClaudeCodeProvider {
             cmd.args(["--system-prompt", system]);
         }
 
-        let output = cmd
-            .output()
+        let mut child = cmd
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .map_err(|e| ProviderError::Network(format!("failed to run claude CLI: {e}")))?;
+
+        // Wait with a 120s timeout — .output() blocks forever if CC hangs.
+        // wait_with_output() consumes Child, so we capture the PID first for kill-on-timeout.
+        let pid = child.id();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(child.wait_with_output());
+        });
+
+        let output = match rx.recv_timeout(Duration::from_secs(120)) {
+            Ok(Ok(o)) => o,
+            Ok(Err(e)) => return Err(ProviderError::Network(format!("claude CLI error: {e}"))),
+            Err(_) => {
+                unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL); }
+                return Err(ProviderError::Other("claude CLI timed out after 120s".to_string()));
+            }
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
