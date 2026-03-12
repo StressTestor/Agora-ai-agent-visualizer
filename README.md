@@ -31,6 +31,7 @@ or grab the DMG from [releases](https://github.com/StressTestor/Agora-ai-agent-v
 **debate mode** — run your own multi-model debates
 
 - 13 providers: Anthropic, OpenAI, OpenRouter, Groq, OpenCode, Gemini, DeepSeek, Moonshot, MiniMax, Z.ai, and more
+- **streaming text** — responses stream in character by character as the model generates them, with a blinking cursor. no waiting for the full response before seeing anything
 - **claude code CLI provider** — no API key needed, uses your existing CC subscription. runs `claude -p` as a subprocess so you never touch the OAuth token
 - mix providers per agent in the same debate (e.g. Claude Haiku via CC vs Gemini Flash via API key)
 - 4-step wizard: team name, agents, topics, settings
