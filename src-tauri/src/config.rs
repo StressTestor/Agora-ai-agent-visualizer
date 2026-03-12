@@ -13,6 +13,13 @@ pub struct ProviderConfig {
 pub struct AppConfig {
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
+    /// Provider to use for topic enhancement and other single-shot AI calls.
+    /// Empty string means auto (falls back to priority list).
+    #[serde(default)]
+    pub enhance_provider: String,
+    /// Model to use for enhancement calls. Empty means use the provider default.
+    #[serde(default)]
+    pub enhance_model: String,
 }
 
 /// Known provider names and their corresponding env var names.
