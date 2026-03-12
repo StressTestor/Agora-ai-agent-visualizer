@@ -253,7 +253,14 @@ fn list_teams(dir: &Path) -> Vec<String> {
 }
 
 /// Scan all inboxes and return newly-seen messages, mutating seen_hashes.
-fn scan_inboxes(dir: &Path, state: &mut AppState) -> Vec<Message> {
+/// `shared_hashes` is pre-populated by the orchestrator for streaming messages;
+/// if a hash appears there we mark it seen but do NOT emit a `new-message` event
+/// (the `debate-message-complete` event already did that).
+fn scan_inboxes(
+    dir: &Path,
+    state: &mut AppState,
+    shared_hashes: &Arc<Mutex<HashSet<u64>>>,
+) -> Vec<Message> {
     let mut new_msgs = vec![];
 
     for team in list_teams(dir) {
@@ -268,7 +275,12 @@ fn scan_inboxes(dir: &Path, state: &mut AppState) -> Vec<Message> {
             }
             for (from, to, content, ts) in parse_inbox(&path, &team) {
                 let hash = hash_message(&team, &from, &to, &content);
+                let streamed = shared_hashes.lock().unwrap().contains(&hash);
                 if state.seen_hashes.insert(hash) {
+                    if streamed {
+                        // Orchestrator already emitted debate-message-complete; skip new-message
+                        continue;
+                    }
                     let msg = Message {
                         from,
                         to,
@@ -480,6 +492,7 @@ fn create_debate(
 fn start_debate_cmd(
     app: AppHandle,
     state: State<'_, Arc<Mutex<AppState>>>,
+    seen: State<'_, Arc<Mutex<HashSet<u64>>>>,
     team: String,
 ) -> Result<(), String> {
     let (debate_state, app_config) = {
@@ -491,7 +504,7 @@ fn start_debate_cmd(
             .clone();
         (ds, st.config.clone())
     };
-    orchestrator::start_debate(app, app_config, debate_state);
+    orchestrator::start_debate(app, app_config, debate_state, seen.inner().clone());
     Ok(())
 }
 
@@ -537,6 +550,7 @@ fn pause_debate(
 fn restart_debate(
     app: AppHandle,
     state: State<'_, Arc<Mutex<AppState>>>,
+    seen: State<'_, Arc<Mutex<HashSet<u64>>>>,
     team: String,
 ) -> Result<(), String> {
     let (debate_state, app_config) = {
@@ -557,7 +571,7 @@ fn restart_debate(
         d.current_topic_idx = 0;
         d.status = orchestrator::DebateStatus::Running;
     }
-    orchestrator::start_debate(app, app_config, debate_state);
+    orchestrator::start_debate(app, app_config, debate_state, seen.inner().clone());
     Ok(())
 }
 
@@ -681,6 +695,8 @@ fn main() {
 
     let app_config = AppConfig::load();
 
+    let shared_hashes: Arc<Mutex<HashSet<u64>>> = Arc::new(Mutex::new(HashSet::new()));
+
     let shared_state = Arc::new(Mutex::new(AppState {
         seen_hashes: HashSet::new(),
         messages: vec![],
@@ -690,10 +706,12 @@ fn main() {
     }));
 
     let state_for_setup = shared_state.clone();
+    let hashes_for_setup = shared_hashes.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_window_state::Builder::new().build())
         .manage(shared_state)
+        .manage(shared_hashes)
         .invoke_handler(tauri::generate_handler![
                 get_teams,
                 delete_team,
@@ -734,11 +752,12 @@ fn main() {
             // Initial scan on the calling thread (fast)
             {
                 let mut st = state.lock().unwrap();
-                let new_msgs = scan_inboxes(&tdir, &mut st);
+                let new_msgs = scan_inboxes(&tdir, &mut st, &hashes_for_setup);
                 drop(new_msgs); // already stored in state.messages; frontend loads via get_messages
             }
 
             // Background watcher thread
+            let hashes_for_watcher = hashes_for_setup.clone();
             std::thread::spawn(move || {
                 let (tx, rx) = std::sync::mpsc::channel::<notify::Result<Event>>();
 
@@ -809,7 +828,7 @@ fn main() {
                         st.known_teams = current_teams;
 
                         // Scan inboxes for new messages
-                        let new_msgs = scan_inboxes(&tdir, &mut st);
+                        let new_msgs = scan_inboxes(&tdir, &mut st, &hashes_for_watcher);
                         drop(st);
 
                         for msg in new_msgs {

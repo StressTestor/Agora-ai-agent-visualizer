@@ -1,6 +1,7 @@
 use crate::config::AppConfig;
 use crate::provider::{self, ChatMessage, Provider};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -55,6 +56,24 @@ pub struct DebateMessage {
 pub struct DebateThinkingEvent {
     pub team: String,
     pub agent: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DebateChunkEvent {
+    pub team: String,
+    pub agent: String,
+    pub chunk: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DebateMessageCompleteEvent {
+    pub team: String,
+    pub agent: String,
+    pub from: String,
+    pub to: String,
+    pub content: String,
+    pub timestamp: u64,
+    pub role: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -385,6 +404,7 @@ pub fn start_debate(
     handle: AppHandle,
     app_config: AppConfig,
     debate_state: Arc<Mutex<DebateState>>,
+    seen_hashes: Arc<Mutex<HashSet<u64>>>,
 ) {
     std::thread::spawn(move || {
         // Create team on disk so watch mode picks it up immediately
@@ -479,12 +499,21 @@ pub fn start_debate(
             let response = 'call: {
                 let mut last_err = None;
                 for attempt in 0..4u32 {
-                    match provider.chat(&context, &agent_config.model) {
+                    let handle_ref = &handle;
+                    let agent_name = agent_config.name.clone();
+                    let team_ref = team_name.clone();
+                    let mut on_chunk = |chunk: &str| {
+                        let _ = handle_ref.emit("debate-message-chunk", DebateChunkEvent {
+                            team: team_ref.clone(),
+                            agent: agent_name.clone(),
+                            chunk: chunk.to_string(),
+                        });
+                    };
+                    match provider.chat_streaming(&context, &agent_config.model, &mut on_chunk) {
                         Ok(text) => break 'call text,
                         Err(e) => {
                             let delay = match &e {
                                 provider::ProviderError::RateLimit(s) => {
-                                    // use Retry-After if provider sent one, else 60s floor
                                     s.parse::<u64>().unwrap_or(0).max(60)
                                 }
                                 _ => 2u64.pow(attempt),
@@ -531,7 +560,31 @@ pub fn start_debate(
                 role: agent_config.role.clone(),
             };
 
-            // Persist to disk — file watcher delivers to frontend (dedup safe)
+            // Pre-insert hash so the file-watcher path won't emit a duplicate
+            // new-message event for this streamed message.
+            {
+                use std::hash::{DefaultHasher, Hash, Hasher};
+                let mut h = DefaultHasher::new();
+                msg.team.hash(&mut h);
+                msg.from.hash(&mut h);
+                msg.to.hash(&mut h);
+                msg.content.hash(&mut h);
+                let hash = h.finish();
+                seen_hashes.lock().unwrap().insert(hash);
+            }
+
+            // Emit complete event so frontend can finalise the streaming bubble
+            let _ = handle.emit("debate-message-complete", DebateMessageCompleteEvent {
+                team: msg.team.clone(),
+                agent: msg.from.clone(),
+                from: msg.from.clone(),
+                to: msg.to.clone(),
+                content: msg.content.clone(),
+                timestamp: msg.timestamp,
+                role: msg.role.clone(),
+            });
+
+            // Persist to disk — file watcher will skip due to pre-inserted hash
             persist_message(&msg);
 
             {

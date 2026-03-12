@@ -305,6 +305,23 @@
     30% { transform: translateY(-4px); opacity: 1; }
   }
 
+  /* Streaming bubble */
+  .streaming-bubble {
+    display: flex; flex-direction: column;
+    padding: 4px 14px; border-left: 2px solid transparent;
+  }
+  .streaming-bubble-meta { display: flex; align-items: baseline; gap: 6px; margin-bottom: 2px; }
+  .streaming-bubble-body {
+    font-size: 11px; color: var(--text); padding-left: 24px;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .streaming-cursor {
+    display: inline-block; width: 2px; height: 11px;
+    background: var(--cyan); vertical-align: text-bottom;
+    margin-left: 1px; animation: blink-cursor 1s step-end infinite;
+  }
+  @keyframes blink-cursor { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
+
   /* Toast */
   #toast {
     position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%);
@@ -447,10 +464,11 @@ function fmtTime(ms) {
 function initials(name) { return name.slice(0, 2).toUpperCase(); }
 
 // ── State ─────────────────────────────────────────────────────
-let messages      = [];
-let currentFilter = null;
-let autoScroll    = true;
-const knownAgents = new Set();
+let messages        = [];
+let currentFilter   = null;
+let autoScroll      = true;
+const knownAgents   = new Set();
+const streamingBubbles = new Map(); // agentName -> { node, bodyEl, cursorEl }
 
 // ── DOM refs ──────────────────────────────────────────────────
 const $chat       = document.getElementById('chat');
@@ -642,6 +660,64 @@ function showThinking(agentName, teamName) {
 
 function clearThinking() {
   if ($thinkingNode) { $thinkingNode.remove(); $thinkingNode = null; thinkingAgent = null; }
+}
+
+function getOrCreateStreamingBubble(agentName, teamName) {
+  if (streamingBubbles.has(agentName)) return streamingBubbles.get(agentName);
+
+  clearThinking();
+
+  const color = agentColor(agentName);
+  const row = document.createElement('div');
+  row.className = 'streaming-bubble';
+  row.style.borderLeftColor = color + '80';
+
+  const meta = document.createElement('div');
+  meta.className = 'streaming-bubble-meta';
+
+  const avatar = document.createElement('span');
+  avatar.className = 'msg-avatar';
+  avatar.style.background = color + '22';
+  avatar.style.color = color;
+  avatar.textContent = initials(agentName);
+
+  const route = document.createElement('span');
+  route.className = 'msg-route';
+  route.style.color = color;
+  route.textContent = agentName;
+
+  const ts = document.createElement('span');
+  ts.className = 'msg-ts';
+  ts.textContent = fmtTime(Date.now());
+
+  meta.append(avatar, route);
+  if (!currentFilter) {
+    const badge = document.createElement('span');
+    badge.className = 'msg-badge';
+    badge.textContent = teamName;
+    meta.appendChild(badge);
+  }
+  meta.appendChild(ts);
+
+  const body = document.createElement('div');
+  body.className = 'streaming-bubble-body';
+
+  const cursor = document.createElement('span');
+  cursor.className = 'streaming-cursor';
+  body.appendChild(cursor);
+
+  row.append(meta, body);
+  $chat.appendChild(row);
+  ensureChip(agentName);
+
+  const entry = { node: row, bodyEl: body, cursorEl: cursor };
+  streamingBubbles.set(agentName, entry);
+  return entry;
+}
+
+function clearStreamingBubble(agentName) {
+  const bubble = streamingBubbles.get(agentName);
+  if (bubble) { bubble.node.remove(); streamingBubbles.delete(agentName); }
 }
 
 function buildSystemNode(text) {
@@ -1796,6 +1872,41 @@ let activeDebateTeam = null;
 async function initDebateControls() {
   const { listen } = window.__TAURI__.event;
 
+  await listen('debate-message-chunk', ({ payload }) => {
+    if (currentFilter && payload.team !== currentFilter) return;
+    $empty.style.display = 'none';
+    const bubble = getOrCreateStreamingBubble(payload.agent, payload.team);
+    const textNode = document.createTextNode(payload.chunk);
+    bubble.bodyEl.insertBefore(textNode, bubble.cursorEl);
+    if (autoScroll) maybeScroll();
+  });
+
+  await listen('debate-message-complete', ({ payload }) => {
+    clearStreamingBubble(payload.agent);
+    const msg = {
+      from: payload.from,
+      to: payload.to,
+      content: payload.content,
+      timestamp: payload.timestamp,
+      team: payload.team,
+      role: payload.role,
+    };
+    if (!isIdleNoise(msg)) {
+      messages.push(msg);
+      if (!currentFilter || msg.team === currentFilter) {
+        $empty.style.display = 'none';
+        const node = buildMessageNode(msg);
+        $chat.appendChild(node);
+        const q = $search.value.toLowerCase();
+        if (q && !node.querySelector('.msg-body').textContent.toLowerCase().includes(q)) {
+          node.style.display = 'none';
+        }
+        maybeScroll();
+      }
+      updateFooter();
+    }
+  });
+
   await listen('debate-status', ({ payload }) => {
     activeDebateTeam = payload.team;
     $debateControls.classList.add('active');
@@ -1812,6 +1923,7 @@ async function initDebateControls() {
     if (payload.status === 'stopped' || payload.status === 'converged' || payload.status === 'error') {
       document.getElementById('btn-pause').textContent = '⏸';
       clearThinking();
+      streamingBubbles.forEach((_, name) => clearStreamingBubble(name));
     }
   });
 }

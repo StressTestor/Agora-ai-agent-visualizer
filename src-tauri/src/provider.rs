@@ -1,3 +1,4 @@
+use std::io::BufRead;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -43,6 +44,19 @@ pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
     fn chat(&self, messages: &[ChatMessage], model: &str) -> Result<String, ProviderError>;
     fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError>;
+
+    /// Stream response chunks by calling `on_chunk` for each partial text fragment.
+    /// Returns the complete accumulated text when done.
+    /// Default implementation falls back to `chat()` without calling `on_chunk`.
+    fn chat_streaming(
+        &self,
+        messages: &[ChatMessage],
+        model: &str,
+        on_chunk: &mut dyn FnMut(&str),
+    ) -> Result<String, ProviderError> {
+        let _ = on_chunk; // fallback: suppress unused warning
+        self.chat(messages, model)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -60,6 +74,25 @@ pub struct OpenAiCompatible {
 struct OpenAiRequest {
     model: String,
     messages: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+}
+
+// SSE streaming response structs
+#[derive(Deserialize)]
+struct OpenAiStreamChunk {
+    choices: Vec<OpenAiStreamChoice>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiStreamChoice {
+    delta: OpenAiDelta,
+}
+
+#[derive(Deserialize)]
+struct OpenAiDelta {
+    #[serde(default)]
+    content: String,
 }
 
 #[derive(Deserialize)]
@@ -125,6 +158,7 @@ impl Provider for OpenAiCompatible {
         let body = OpenAiRequest {
             model: model.to_string(),
             messages: messages.to_vec(),
+            stream: None,
         };
 
         let resp = self
@@ -196,6 +230,76 @@ impl Provider for OpenAiCompatible {
             })
             .collect())
     }
+
+    fn chat_streaming(
+        &self,
+        messages: &[ChatMessage],
+        model: &str,
+        on_chunk: &mut dyn FnMut(&str),
+    ) -> Result<String, ProviderError> {
+        let url = format!("{}/chat/completions", self.base_url);
+        let body = OpenAiRequest {
+            model: model.to_string(),
+            messages: messages.to_vec(),
+            stream: Some(true),
+        };
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .json(&body)
+            .send()
+            .map_err(|e| ProviderError::Network(e.to_string()))?;
+
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(ProviderError::Auth("invalid API key".to_string()));
+        }
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            return Err(ProviderError::RateLimit(retry_after.to_string()));
+        }
+        if !status.is_success() {
+            let text = resp.text().unwrap_or_default();
+            return Err(ProviderError::Other(format!("HTTP {status}: {text}")));
+        }
+
+        let mut accumulated = String::new();
+        let reader = std::io::BufReader::new(resp);
+        for line in reader.lines() {
+            let line = line.map_err(|e| ProviderError::Network(e.to_string()))?;
+            let line = line.trim().to_string();
+            if line.is_empty() || line == "data: [DONE]" {
+                continue;
+            }
+            let data = match line.strip_prefix("data: ") {
+                Some(d) => d,
+                None => continue,
+            };
+            let chunk: OpenAiStreamChunk = match serde_json::from_str(data) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            if let Some(choice) = chunk.choices.first() {
+                let text = &choice.delta.content;
+                if !text.is_empty() {
+                    on_chunk(text);
+                    accumulated.push_str(text);
+                }
+            }
+        }
+
+        if accumulated.is_empty() {
+            return Err(ProviderError::Other("stream ended with no content".to_string()));
+        }
+        Ok(accumulated)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +320,25 @@ struct AnthropicRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<String>,
     messages: Vec<AnthropicMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+}
+
+// Anthropic SSE streaming structs
+#[derive(Deserialize)]
+struct AnthropicStreamEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    #[serde(default)]
+    delta: AnthropicStreamDelta,
+}
+
+#[derive(Deserialize, Default)]
+struct AnthropicStreamDelta {
+    #[serde(rename = "type", default)]
+    delta_type: String,
+    #[serde(default)]
+    text: String,
 }
 
 #[derive(Serialize)]
@@ -287,6 +410,7 @@ impl Provider for AnthropicClient {
             max_tokens: 4096,
             system,
             messages: api_messages,
+            stream: None,
         };
 
         let resp = self
@@ -364,6 +488,93 @@ impl Provider for AnthropicClient {
                 provider: "anthropic".to_string(),
             })
             .collect())
+    }
+
+    fn chat_streaming(
+        &self,
+        messages: &[ChatMessage],
+        model: &str,
+        on_chunk: &mut dyn FnMut(&str),
+    ) -> Result<String, ProviderError> {
+        let system = messages
+            .iter()
+            .find(|m| m.role == "system")
+            .map(|m| m.content.clone());
+
+        let api_messages: Vec<AnthropicMessage> = messages
+            .iter()
+            .filter(|m| m.role != "system")
+            .map(|m| AnthropicMessage {
+                role: m.role.clone(),
+                content: m.content.clone(),
+            })
+            .collect();
+
+        let body = AnthropicRequest {
+            model: model.to_string(),
+            max_tokens: 4096,
+            system,
+            messages: api_messages,
+            stream: Some(true),
+        };
+
+        let resp = self
+            .client
+            .post(format!("{}/v1/messages", self.base_url))
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .map_err(|e| ProviderError::Network(e.to_string()))?;
+
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(ProviderError::Auth("invalid API key".to_string()));
+        }
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            return Err(ProviderError::RateLimit(retry_after.to_string()));
+        }
+        if !status.is_success() {
+            let text = resp.text().unwrap_or_default();
+            return Err(ProviderError::Other(format!("HTTP {status}: {text}")));
+        }
+
+        let mut accumulated = String::new();
+        let reader = std::io::BufReader::new(resp);
+        for line in reader.lines() {
+            let line = line.map_err(|e| ProviderError::Network(e.to_string()))?;
+            let line = line.trim().to_string();
+            if line.is_empty() {
+                continue;
+            }
+            let data = match line.strip_prefix("data: ") {
+                Some(d) => d,
+                None => continue,
+            };
+            let event: AnthropicStreamEvent = match serde_json::from_str(data) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if event.event_type == "content_block_delta"
+                && event.delta.delta_type == "text_delta"
+                && !event.delta.text.is_empty()
+            {
+                on_chunk(&event.delta.text);
+                accumulated.push_str(&event.delta.text);
+            }
+        }
+
+        if accumulated.is_empty() {
+            return Err(ProviderError::Other("stream ended with no content".to_string()));
+        }
+        Ok(accumulated)
     }
 }
 
