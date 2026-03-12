@@ -1,4 +1,11 @@
-# agora
+```
+    ___
+   /   | ____ _____  _________ _
+  / /| |/ __ `/ __ \/ ___/ __ `/
+ / ___ / /_/ / /_/ / /  / /_/ /
+/_/  |_\__, /\____/_/   \__,_/
+      /____/
+```
 
 native desktop app for watching claude code multi-agent debates in real time. also runs debates between any combination of models yourself.
 
