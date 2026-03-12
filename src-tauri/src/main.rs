@@ -392,7 +392,10 @@ fn list_models(
     state: State<'_, Arc<Mutex<AppState>>>,
     provider_name: String,
 ) -> Result<Vec<provider::ModelInfo>, String> {
-    let api_key = {
+    const NO_KEY_PROVIDERS: &[&str] = &["claude-code"];
+    let api_key = if NO_KEY_PROVIDERS.contains(&provider_name.as_str()) {
+        String::new()
+    } else {
         let st = state.lock().unwrap();
         st.config
             .api_key(&provider_name)
@@ -586,6 +589,67 @@ fn get_debate_status(
 }
 
 #[tauri::command]
+fn enhance_topic(
+    state: State<'_, Arc<Mutex<AppState>>>,
+    text: String,
+) -> Result<String, String> {
+    // CC first — no key needed and it's the primary use case for Agora.
+    // Falls back through API-key providers in order.
+    const PRIORITY: &[(&str, &str)] = &[
+        ("claude-code", "haiku"),
+        ("anthropic",   "claude-haiku-4-5-20251001"),
+        ("groq",        "llama-3.3-70b-versatile"),
+        ("openai",      "gpt-4o-mini"),
+        ("gemini",      "gemini-2.0-flash"),
+        ("openrouter",  "meta-llama/llama-3.3-70b-instruct:free"),
+    ];
+
+    let config = { state.lock().unwrap().config.clone() };
+
+    // Use user-configured provider if set, otherwise auto-select from priority list.
+    let (provider_name, model): (String, String) = if !config.enhance_provider.is_empty() {
+        let model = if config.enhance_model.is_empty() {
+            PRIORITY.iter()
+                .find(|(p, _)| *p == config.enhance_provider.as_str())
+                .map(|(_, m)| m.to_string())
+                .unwrap_or_else(|| "haiku".to_string())
+        } else {
+            config.enhance_model.clone()
+        };
+        (config.enhance_provider.clone(), model)
+    } else {
+        let (p, m) = PRIORITY
+            .iter()
+            .find(|(p, _)| *p == "claude-code" || config.api_key(p).is_some())
+            .ok_or_else(|| "no providers configured — add an API key in settings".to_string())?;
+        (p.to_string(), m.to_string())
+    };
+    let api_key = if provider_name == "claude-code" {
+        String::new()
+    } else {
+        config.api_key(&provider_name).unwrap_or_default()
+    };
+
+    let provider = provider::build_provider(&provider_name, &api_key)
+        .ok_or_else(|| format!("unknown provider '{provider_name}'"))?;
+
+    let messages = vec![
+        provider::ChatMessage {
+            role: "system".to_string(),
+            content: "You refine debate topics. Reply with only the refined topic — no explanation, no bullet points, no surrounding quotes, no lead-in.".to_string(),
+        },
+        provider::ChatMessage {
+            role: "user".to_string(),
+            content: format!(
+                "Refine this into a specific, debatable topic for a structured multi-agent debate. Make it concrete enough that agents can take clear opposing positions:\n\n{text}"
+            ),
+        },
+    ];
+
+    provider.chat(&messages, &model).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn show_main_and_close_splash(app: AppHandle) {
     if let Some(main) = app.get_webview_window("main") {
         let _ = main.show();
@@ -646,6 +710,7 @@ fn main() {
                 pause_debate,
                 restart_debate,
                 get_debate_status,
+                enhance_topic,
                 show_main_and_close_splash,
             ])
         .setup(move |app| {
