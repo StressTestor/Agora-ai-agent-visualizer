@@ -368,12 +368,107 @@ impl Provider for AnthropicClient {
 }
 
 // ---------------------------------------------------------------------------
+// Claude Code CLI provider (subprocess, uses CC OAuth — no API key needed)
+// ---------------------------------------------------------------------------
+
+pub struct ClaudeCodeProvider;
+
+impl Provider for ClaudeCodeProvider {
+    fn name(&self) -> &str {
+        "claude-code"
+    }
+
+    fn chat(&self, messages: &[ChatMessage], model: &str) -> Result<String, ProviderError> {
+        let system = messages
+            .iter()
+            .find(|m| m.role == "system")
+            .map(|m| m.content.as_str())
+            .unwrap_or("");
+
+        let conv: Vec<&ChatMessage> = messages
+            .iter()
+            .filter(|m| m.role != "system")
+            .collect();
+
+        if conv.is_empty() {
+            return Err(ProviderError::Other("no messages to send".to_string()));
+        }
+
+        // Flatten conversation history into the prompt. For a single message
+        // pass it directly; for multi-turn, label each turn so CC has context.
+        let prompt = if conv.len() == 1 {
+            conv[0].content.clone()
+        } else {
+            conv.iter()
+                .map(|m| {
+                    let label = if m.role == "assistant" { "you" } else { "other" };
+                    format!("[{label}]: {}", m.content)
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        };
+
+        // GUI apps don't inherit shell PATH — resolve the binary explicitly.
+        let claude_bin = [
+            "/opt/homebrew/bin/claude",
+            "/usr/local/bin/claude",
+            "/usr/bin/claude",
+        ]
+        .iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .copied()
+        .unwrap_or("claude");
+
+        let mut cmd = std::process::Command::new(claude_bin);
+        cmd.args([
+            "-p", &prompt,
+            "--model", model,
+            "--output-format", "json",
+            "--max-turns", "1",
+            "--tools", "",
+            "--no-session-persistence",
+        ]);
+
+        if !system.is_empty() {
+            cmd.args(["--system-prompt", system]);
+        }
+
+        let output = cmd
+            .output()
+            .map_err(|e| ProviderError::Network(format!("failed to run claude CLI: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(ProviderError::Other(format!("claude CLI error: {stderr}")));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let json: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|e| ProviderError::Other(format!("failed to parse claude output: {e}")))?;
+
+        json["result"]
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| ProviderError::Other(format!("no result field in output: {stdout}")))
+    }
+
+    fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        Ok(vec![
+            ModelInfo { id: "haiku".to_string(), provider: "claude-code".to_string() },
+            ModelInfo { id: "sonnet".to_string(), provider: "claude-code".to_string() },
+            ModelInfo { id: "opus".to_string(), provider: "claude-code".to_string() },
+        ])
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Provider factory
 // ---------------------------------------------------------------------------
 
 pub fn build_provider(name: &str, api_key: &str) -> Option<Box<dyn Provider>> {
     match name {
         "anthropic" => Some(Box::new(AnthropicClient::new(api_key))),
+        "claude-code" => Some(Box::new(ClaudeCodeProvider)),
         "minimax-coding" => Some(Box::new(AnthropicClient::with_base_url(
             "minimax-coding",
             api_key,
