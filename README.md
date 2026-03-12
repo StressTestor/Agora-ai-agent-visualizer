@@ -4,7 +4,7 @@ native desktop app for watching claude code multi-agent debates in real time. al
 
 i built this because claude code's multi-agent teams dump JSON into inbox files and there's no native way to watch the conversation unfold. then i added a full debate runner on top. then i kept going.
 
-https://github.com/user-attachments/assets/agora-intro.mp4
+https://github.com/StressTestor/Agora-ai-agent-visualizer/releases/download/v0.2.0/agora-intro.mp4
 
 ## install
 
