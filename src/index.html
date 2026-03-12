@@ -281,6 +281,25 @@
   .thinking-dots span:nth-child(1) { animation-delay: 0s; }
   .thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
   .thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+  .btn-enhance {
+    background: transparent; border: none; cursor: pointer;
+    color: var(--muted); font-size: 11px; padding: 0 2px;
+    line-height: 1; transition: color 0.15s, opacity 0.15s;
+    position: relative;
+  }
+  .btn-enhance:hover { color: var(--cyan); }
+  .btn-enhance.loading { animation: spin 0.8s linear infinite; pointer-events: none; }
+  .btn-enhance .tooltip {
+    display: none; position: absolute; bottom: 120%; left: 50%;
+    transform: translateX(-50%); white-space: nowrap;
+    background: var(--surface); border: 1px solid var(--border);
+    color: var(--text); font-size: 10px; padding: 3px 7px; border-radius: 4px;
+    pointer-events: none; z-index: 100;
+  }
+  .btn-enhance:hover .tooltip { display: block; }
+
   @keyframes thinking-bounce {
     0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
     30% { transform: translateY(-4px); opacity: 1; }
@@ -337,6 +356,16 @@
     <div class="modal-panel">
       <h3>api keys</h3>
       <div id="settings-providers"></div>
+      <h3 style="margin-top:16px">generation model</h3>
+      <p style="color:var(--muted);font-size:10px;margin-bottom:8px">used for topic refinement and other single-shot AI calls. defaults to claude code (CLI) if unset.</p>
+      <div class="field-group">
+        <div class="field-row" style="gap:6px">
+          <select id="settings-enhance-provider" class="field-input" style="flex:1">
+            <option value="">auto</option>
+          </select>
+          <input id="settings-enhance-model" class="field-input" type="text" placeholder="model (optional)" style="flex:1">
+        </div>
+      </div>
       <div class="modal-footer">
         <button class="btn-sm" id="settings-cancel">cancel</button>
         <button class="btn-primary" id="settings-save">save</button>
@@ -844,8 +873,9 @@ function showToast(msg) {
 // ── Settings panel ───────────────────────────────────────────
 const $settingsOverlay = document.getElementById('settings-overlay');
 const $settingsProviders = document.getElementById('settings-providers');
-const PROVIDERS = ['openai', 'openrouter', 'groq', 'opencode', 'anthropic', 'gemini', 'deepseek', 'moonshot', 'minimax', 'minimax-coding', 'zai', 'zai-coding'];
-const PROVIDER_LABELS = { 'opencode': 'opencode zen', 'minimax-coding': 'minimax (coding plan)', 'zai-coding': 'z.ai (coding plan)' };
+const PROVIDERS = ['openai', 'openrouter', 'groq', 'opencode', 'anthropic', 'claude-code', 'gemini', 'deepseek', 'moonshot', 'minimax', 'minimax-coding', 'zai', 'zai-coding'];
+const PROVIDER_LABELS = { 'opencode': 'opencode zen', 'claude-code': 'claude code (CLI)', 'minimax-coding': 'minimax (coding plan)', 'zai-coding': 'z.ai (coding plan)' };
+const NO_KEY_PROVIDERS = new Set(['claude-code']);
 const providerLabel = p => PROVIDER_LABELS[p] || p;
 
 document.getElementById('btn-settings').addEventListener('click', async () => {
@@ -866,6 +896,19 @@ async function loadSettings() {
   const config = await invoke('get_config');
   $settingsProviders.textContent = '';
 
+  // Populate generation model dropdowns
+  const enhanceProviderSel = document.getElementById('settings-enhance-provider');
+  const enhanceModelInput = document.getElementById('settings-enhance-model');
+  enhanceProviderSel.innerHTML = '<option value="">auto</option>';
+  PROVIDERS.forEach(p => {
+    const opt = document.createElement('option');
+    opt.value = p;
+    opt.textContent = providerLabel(p);
+    if (config.enhance_provider === p) opt.selected = true;
+    enhanceProviderSel.appendChild(opt);
+  });
+  enhanceModelInput.value = config.enhance_model || '';
+
   for (const name of PROVIDERS) {
     const existing = config.providers[name] || { api_key: '', enabled: false };
     const group = document.createElement('div');
@@ -879,15 +922,24 @@ async function loadSettings() {
     row.className = 'field-row';
 
     const dot = document.createElement('span');
-    dot.className = 'status-dot ' + (existing.api_key ? 'ok' : 'none');
+    dot.className = 'status-dot ' + (NO_KEY_PROVIDERS.has(name) ? 'ok' : (existing.api_key ? 'ok' : 'none'));
     dot.dataset.provider = name;
 
-    const input = document.createElement('input');
-    input.className = 'field-input';
-    input.type = 'password';
-    input.placeholder = `${name} API key`;
-    input.value = existing.api_key || '';
-    input.dataset.provider = name;
+    let input;
+    if (NO_KEY_PROVIDERS.has(name)) {
+      input = document.createElement('span');
+      input.className = 'field-input';
+      input.style.cssText = 'color:var(--muted);font-style:italic;display:flex;align-items:center';
+      input.textContent = 'uses Claude Code auth — no key needed';
+      input.dataset.provider = name;
+    } else {
+      input = document.createElement('input');
+      input.className = 'field-input';
+      input.type = 'password';
+      input.placeholder = `${name} API key`;
+      input.value = existing.api_key || '';
+      input.dataset.provider = name;
+    }
 
     const testBtn = document.createElement('button');
     testBtn.className = 'btn-sm';
@@ -920,9 +972,18 @@ async function saveCurrentSettings() {
   const inputs = $settingsProviders.querySelectorAll('.field-input');
   inputs.forEach(input => {
     const name = input.dataset.provider;
+    if (NO_KEY_PROVIDERS.has(name)) {
+      config.providers[name] = { api_key: '', enabled: true };
+      return;
+    }
     const key = input.value.trim();
     config.providers[name] = { api_key: key, enabled: key.length > 0 };
   });
+  const enhanceProviderSel = document.getElementById('settings-enhance-provider');
+  const enhanceModelInput = document.getElementById('settings-enhance-model');
+  if (enhanceProviderSel) config.enhance_provider = enhanceProviderSel.value;
+  if (enhanceModelInput) config.enhance_model = enhanceModelInput.value.trim();
+
   await invoke('save_config', { config });
 }
 
@@ -1046,11 +1107,24 @@ async function renderStep1() {
   customOpt.textContent = 'custom';
   presetSelect.appendChild(customOpt);
 
+  // Group presets by category
+  const presetGroups = {};
+  const presetGroupOrder = [];
   cachedPresets.forEach((p, i) => {
-    const opt = document.createElement('option');
-    opt.value = i;
-    opt.textContent = `${p.name} — ${p.description}`;
-    presetSelect.appendChild(opt);
+    const cat = p.category || 'other';
+    if (!presetGroups[cat]) { presetGroups[cat] = []; presetGroupOrder.push(cat); }
+    presetGroups[cat].push({ p, i });
+  });
+  presetGroupOrder.forEach(cat => {
+    const og = document.createElement('optgroup');
+    og.label = cat;
+    presetGroups[cat].forEach(({ p, i }) => {
+      const opt = document.createElement('option');
+      opt.value = i;
+      opt.textContent = `${p.name} — ${p.description}`;
+      og.appendChild(opt);
+    });
+    presetSelect.appendChild(og);
   });
 
   presetSelect.addEventListener('change', () => {
@@ -1071,7 +1145,11 @@ async function renderStep1() {
     }
   });
 
-  presetGroup.append(presetLabel, presetSelect);
+  const presetWrap = document.createElement('div');
+  presetWrap.style.cssText = 'display:flex;flex-direction:column;gap:0';
+  presetWrap.appendChild(presetSelect);
+  presetGroup.append(presetLabel, presetWrap);
+  attachSelectSearch(presetSelect, '⌕ filter presets...');
 
   const statusGroup = document.createElement('div');
   statusGroup.className = 'field-group';
@@ -1082,7 +1160,7 @@ async function renderStep1() {
   statusRow.style.cssText = 'display:flex;gap:10px;flex-wrap:wrap;margin-top:4px';
 
   PROVIDERS.forEach(name => {
-    const hasKey = config.providers[name] && config.providers[name].api_key;
+    const hasKey = NO_KEY_PROVIDERS.has(name) || (config.providers[name] && config.providers[name].api_key);
     const chip = document.createElement('span');
     chip.style.cssText = `font-size:10px;color:${hasKey ? '#34d399' : 'var(--muted)'}`;
     chip.textContent = `${hasKey ? '●' : '○'} ${providerLabel(name)}`;
@@ -1141,6 +1219,58 @@ async function renderStep1() {
   } else {
     $wizardBody.append(nameGroup, presetGroup, statusGroup);
   }
+}
+
+// Attach a filter input above a <select>. Handles <optgroup> children.
+// Returns the search input element.
+function attachSelectSearch(selectEl, placeholder) {
+  // Snapshot options preserving their group label
+  const allOpts = [];
+  selectEl.querySelectorAll('option').forEach(o => {
+    allOpts.push({
+      value: o.value,
+      text: o.textContent,
+      group: o.parentElement.tagName === 'OPTGROUP' ? o.parentElement.label : '',
+      selected: o.selected,
+    });
+  });
+
+  const search = document.createElement('input');
+  search.className = 'field-input';
+  search.type = 'text';
+  search.placeholder = placeholder || '⌕ filter...';
+  search.style.cssText = 'font-size:10px;padding:2px 6px;margin-bottom:2px';
+
+  search.addEventListener('input', () => {
+    const q = search.value.toLowerCase();
+    const cur = selectEl.value;
+    selectEl.innerHTML = '';
+
+    const filtered = allOpts.filter(o => !q || o.text.toLowerCase().includes(q));
+
+    // Rebuild preserving optgroups (skip empty groups when filtering)
+    const groups = {};
+    const groupOrder = [];
+    filtered.forEach(o => {
+      if (!groups[o.group]) { groups[o.group] = []; groupOrder.push(o.group); }
+      groups[o.group].push(o);
+    });
+
+    groupOrder.forEach(g => {
+      const container = g ? Object.assign(document.createElement('optgroup'), { label: g }) : selectEl;
+      groups[g].forEach(o => {
+        const opt = document.createElement('option');
+        opt.value = o.value;
+        opt.textContent = o.text;
+        if (o.value === cur) opt.selected = true;
+        container.appendChild(opt);
+      });
+      if (g) selectEl.appendChild(container);
+    });
+  });
+
+  selectEl.parentNode.insertBefore(search, selectEl);
+  return search;
 }
 
 function inferProvider(model) {
@@ -1362,7 +1492,11 @@ function renderAgentRow(container, agent, idx) {
     fetchAndReplaceModel(agent.provider, modelInput, agent.model);
   }
 
-  pmRow.append(providerSelect, modelInput);
+  const providerWrap = document.createElement('div');
+  providerWrap.style.cssText = 'display:flex;flex-direction:column;gap:0';
+  providerWrap.appendChild(providerSelect);
+  attachSelectSearch(providerSelect, '⌕ filter providers...');
+  pmRow.append(providerWrap, modelInput);
 
   const roleRow = document.createElement('div');
   roleRow.className = 'field-row';
@@ -1376,12 +1510,26 @@ function renderAgentRow(container, agent, idx) {
   customRoleOpt.value = 'custom';
   customRoleOpt.textContent = 'custom role';
   roleSelect.appendChild(customRoleOpt);
+
+  // Group roles by category
+  const roleGroups = {};
+  const roleGroupOrder = [];
   cachedRoles.forEach(r => {
-    const opt = document.createElement('option');
-    opt.value = r.name;
-    opt.textContent = `${r.name} — ${r.description}`;
-    if (agent.role === r.name) opt.selected = true;
-    roleSelect.appendChild(opt);
+    const cat = r.category || 'other';
+    if (!roleGroups[cat]) { roleGroups[cat] = []; roleGroupOrder.push(cat); }
+    roleGroups[cat].push(r);
+  });
+  roleGroupOrder.forEach(cat => {
+    const og = document.createElement('optgroup');
+    og.label = cat;
+    roleGroups[cat].forEach(r => {
+      const opt = document.createElement('option');
+      opt.value = r.name;
+      opt.textContent = `${r.name} — ${r.description}`;
+      if (agent.role === r.name) opt.selected = true;
+      og.appendChild(opt);
+    });
+    roleSelect.appendChild(og);
   });
 
   roleSelect.addEventListener('change', () => {
@@ -1394,7 +1542,11 @@ function renderAgentRow(container, agent, idx) {
     }
   });
 
-  roleRow.appendChild(roleSelect);
+  const roleWrap = document.createElement('div');
+  roleWrap.style.cssText = 'display:flex;flex-direction:column;gap:0;flex:1';
+  roleWrap.appendChild(roleSelect);
+  roleRow.appendChild(roleWrap);
+  attachSelectSearch(roleSelect, '⌕ filter roles...');
 
   const promptArea = document.createElement('textarea');
   promptArea.className = 'field-input';
@@ -1427,16 +1579,42 @@ function renderStep3() {
 
   const topicGroup = document.createElement('div');
   topicGroup.className = 'field-group';
+
+  const topicLabelRow = document.createElement('div');
+  topicLabelRow.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-bottom:4px';
   const topicLabel = document.createElement('label');
   topicLabel.className = 'field-label';
+  topicLabel.style.margin = '0';
   topicLabel.textContent = 'topics (one per line)';
+
+  const enhanceBtn = document.createElement('button');
+  enhanceBtn.className = 'btn-enhance';
+  enhanceBtn.innerHTML = '✦<span class="tooltip">refine topic with configured AI</span>';
+  enhanceBtn.addEventListener('click', async () => {
+    const text = topicArea.value.trim();
+    if (!text) return;
+    enhanceBtn.classList.add('loading');
+    try {
+      const { invoke } = window.__TAURI__.core;
+      const refined = await invoke('enhance_topic', { text });
+      topicArea.value = refined;
+      wizardState.topics = refined;
+    } catch (err) {
+      showToast(`enhance failed: ${err}`);
+    } finally {
+      enhanceBtn.classList.remove('loading');
+    }
+  });
+
+  topicLabelRow.append(topicLabel, enhanceBtn);
+
   const topicArea = document.createElement('textarea');
   topicArea.className = 'field-input';
   topicArea.id = 'wizard-topics';
   topicArea.style.cssText = 'width:100%;min-height:60px;resize:vertical';
   topicArea.value = wizardState.topics;
   topicArea.placeholder = 'e.g., should we use rust or go for the backend?';
-  topicGroup.append(topicLabel, topicArea);
+  topicGroup.append(topicLabelRow, topicArea);
 
   const visGroup = document.createElement('div');
   visGroup.className = 'field-group';
