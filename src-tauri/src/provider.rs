@@ -639,6 +639,7 @@ impl Provider for ClaudeCodeProvider {
             "--max-turns", "1",
             "--tools", "",
             "--no-session-persistence",
+            "--disable-slash-commands",
         ]);
 
         if !system.is_empty() {
@@ -682,6 +683,132 @@ impl Provider for ClaudeCodeProvider {
             .as_str()
             .map(String::from)
             .ok_or_else(|| ProviderError::Other(format!("no result field in output: {stdout}")))
+    }
+
+    fn chat_streaming(
+        &self,
+        messages: &[ChatMessage],
+        model: &str,
+        on_chunk: &mut dyn FnMut(&str),
+    ) -> Result<String, ProviderError> {
+        let system = messages
+            .iter()
+            .find(|m| m.role == "system")
+            .map(|m| m.content.as_str())
+            .unwrap_or("");
+
+        let conv: Vec<&ChatMessage> = messages
+            .iter()
+            .filter(|m| m.role != "system")
+            .collect();
+
+        if conv.is_empty() {
+            return Err(ProviderError::Other("no messages to send".to_string()));
+        }
+
+        let prompt = if conv.len() == 1 {
+            conv[0].content.clone()
+        } else {
+            conv.iter()
+                .map(|m| {
+                    let label = if m.role == "assistant" { "you" } else { "other" };
+                    format!("[{label}]: {}", m.content)
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        };
+
+        let claude_bin = [
+            "/opt/homebrew/bin/claude",
+            "/usr/local/bin/claude",
+            "/usr/bin/claude",
+        ]
+        .iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .copied()
+        .unwrap_or("claude");
+
+        let mut cmd = std::process::Command::new(claude_bin);
+        cmd.args([
+            "-p", &prompt,
+            "--model", model,
+            "--output-format", "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+            "--max-turns", "1",
+            "--tools", "",
+            "--no-session-persistence",
+            "--disable-slash-commands",
+        ]);
+
+        if !system.is_empty() {
+            cmd.args(["--system-prompt", system]);
+        }
+
+        let mut child = cmd
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| ProviderError::Network(format!("failed to run claude CLI: {e}")))?;
+
+        let pid = child.id();
+        let stdout = child.stdout.take()
+            .ok_or_else(|| ProviderError::Other("failed to capture stdout".to_string()))?;
+
+        // Spawn a kill timer — 120s max.
+        let kill_pid = pid;
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(120));
+            unsafe { libc::kill(kill_pid as libc::pid_t, libc::SIGKILL); }
+        });
+
+        let reader = std::io::BufReader::new(stdout);
+        let mut accumulated = String::new();
+        let mut final_result: Option<String> = None;
+
+        for line in reader.lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+
+            if line.is_empty() {
+                continue;
+            }
+
+            let json: serde_json::Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            // Check for text_delta in stream events
+            if json["type"] == "stream_event" {
+                let event = &json["event"];
+                if event["type"] == "content_block_delta" {
+                    let delta = &event["delta"];
+                    if delta["type"] == "text_delta" {
+                        if let Some(text) = delta["text"].as_str() {
+                            accumulated.push_str(text);
+                            on_chunk(text);
+                        }
+                    }
+                }
+            }
+
+            // Check for final result
+            if json["type"] == "result" {
+                if let Some(r) = json["result"].as_str() {
+                    final_result = Some(r.to_string());
+                }
+            }
+        }
+
+        let _ = child.wait();
+
+        final_result
+            .or_else(|| if accumulated.is_empty() { None } else { Some(accumulated) })
+            .ok_or_else(|| ProviderError::Other("no output from claude CLI stream".to_string()))
     }
 
     fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
