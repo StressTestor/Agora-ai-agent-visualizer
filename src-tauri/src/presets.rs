@@ -164,6 +164,19 @@ pub fn role_presets() -> Vec<RolePreset> {
             description: "ToS compliance, liability, data handling, legal exposure".to_string(),
             system_prompt: "you flag legal and compliance exposure. when proposals come up, ask: what are the terms of service implications? what data is being handled and how? who's liable if this breaks? are there jurisdictional issues? don't be a generalized blocker — be specific about the actual legal risk and its likelihood. 'this could theoretically violate GDPR' is less useful than 'storing this data without explicit consent violates GDPR Article 6 in EU markets — here's what changes.' if something is clearly fine, say so and move on. your value is in identifying real exposure, not in treating every feature as a liability.".to_string(),
         },
+        // ── Arena roles ──────────────────────────────────────────────────
+        RolePreset {
+            name: "debater".to_string(),
+            category: "arena".to_string(),
+            description: "raw debater — no assigned position, argue to win".to_string(),
+            system_prompt: "you are a debater in a model arena. you will be given a topic and you argue your position as strongly as possible. no assigned role bias — just make the best arguments you can. be persuasive, use evidence, anticipate counterarguments. you're being compared directly against the other debater(s), so bring your best reasoning. don't hedge. don't both-sides it. pick a lane and win.".to_string(),
+        },
+        RolePreset {
+            name: "judge".to_string(),
+            category: "arena".to_string(),
+            description: "scores debaters on reasoning, evidence, persuasion".to_string(),
+            system_prompt: "you are the judge in a model arena debate. watch the debaters argue, then score them on: (1) reasoning quality — are the arguments logically sound, (2) evidence and specificity — do they back claims with concrete examples, (3) persuasion — who actually changed your mind or made the stronger case, (4) engagement — did they address the other side's points or talk past them. give a clear winner with specific reasoning. no ties unless genuinely indistinguishable. quote the strongest and weakest moments from each debater.".to_string(),
+        },
         // ── Perspective roles ─────────────────────────────────────────────────
         RolePreset {
             name: "user advocate".to_string(),
@@ -330,6 +343,48 @@ pub fn debate_presets() -> Vec<DebatePreset> {
             visibility: "group".to_string(),
             termination: "topic".to_string(),
             default_rounds: 10,
+        },
+        // ── Arena presets ────────────────────────────────────────────────
+        DebatePreset {
+            name: "1v1 duel".to_string(),
+            category: "arena".to_string(),
+            description: "two models head-to-head, judge picks a winner. assign different providers to each debater.".to_string(),
+            agents: vec![
+                DebatePresetAgent { name: "model-a".to_string(), role: "debater".to_string() },
+                DebatePresetAgent { name: "model-b".to_string(), role: "debater".to_string() },
+                DebatePresetAgent { name: "judge".to_string(), role: "judge".to_string() },
+            ],
+            visibility: "group".to_string(),
+            termination: "fixed".to_string(),
+            default_rounds: 5,
+        },
+        DebatePreset {
+            name: "3-way arena".to_string(),
+            category: "arena".to_string(),
+            description: "three models debate, judge ranks them. assign a different provider to each.".to_string(),
+            agents: vec![
+                DebatePresetAgent { name: "model-a".to_string(), role: "debater".to_string() },
+                DebatePresetAgent { name: "model-b".to_string(), role: "debater".to_string() },
+                DebatePresetAgent { name: "model-c".to_string(), role: "debater".to_string() },
+                DebatePresetAgent { name: "judge".to_string(), role: "judge".to_string() },
+            ],
+            visibility: "group".to_string(),
+            termination: "fixed".to_string(),
+            default_rounds: 5,
+        },
+        DebatePreset {
+            name: "provider showdown".to_string(),
+            category: "arena".to_string(),
+            description: "two debaters + contrarian + judge. pit providers against each other with pressure.".to_string(),
+            agents: vec![
+                DebatePresetAgent { name: "model-a".to_string(), role: "debater".to_string() },
+                DebatePresetAgent { name: "model-b".to_string(), role: "debater".to_string() },
+                DebatePresetAgent { name: "contrarian".to_string(), role: "contrarian".to_string() },
+                DebatePresetAgent { name: "judge".to_string(), role: "judge".to_string() },
+            ],
+            visibility: "group".to_string(),
+            termination: "fixed".to_string(),
+            default_rounds: 6,
         },
     ]
 }
