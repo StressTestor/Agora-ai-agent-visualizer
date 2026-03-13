@@ -49,7 +49,7 @@ or grab the DMG from [releases](https://github.com/StressTestor/Agora-ai-agent-v
 - pause/resume/stop/restart controls
 - API keys stored locally at `~/.config/agora/config.json`
 
-**25 role presets across 6 categories**
+**27 role presets across 7 categories**
 
 | category | roles |
 |---|---|
@@ -59,8 +59,9 @@ or grab the DMG from [releases](https://github.com/StressTestor/Agora-ai-agent-v
 | creative | visual designer, brand strategist, art director, minimalist, marketer |
 | business | product manager, stakeholder, end user, legal |
 | perspective | user advocate, first principles |
+| arena | debater, judge |
 
-**10 debate presets across 5 categories**
+**13 debate presets across 6 categories**
 
 | category | presets |
 |---|---|
@@ -69,6 +70,7 @@ or grab the DMG from [releases](https://github.com/StressTestor/Agora-ai-agent-v
 | product | product critique, feature scoping, build vs buy |
 | creative | creative review |
 | research | research panel, first principles reset |
+| arena | 1v1 duel, 3-way arena, provider showdown |
 
 role and preset dropdowns have search/filter built in.
 
