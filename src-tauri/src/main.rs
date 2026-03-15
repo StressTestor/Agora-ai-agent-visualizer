@@ -348,8 +348,12 @@ fn list_team_configs() -> Vec<TeamConfig> {
     let mut result = vec![];
     for team in list_teams(&tdir) {
         let path = tdir.join(&team).join("config.json");
-        let Ok(raw) = std::fs::read_to_string(&path) else { continue };
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) else { continue };
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
         let name = val["name"].as_str().unwrap_or(&team).to_string();
         let description = val["description"].as_str().unwrap_or("").to_string();
         let members = val["members"]
@@ -364,7 +368,11 @@ fn list_team_configs() -> Vec<TeamConfig> {
                     .collect()
             })
             .unwrap_or_default();
-        result.push(TeamConfig { name, description, members });
+        result.push(TeamConfig {
+            name,
+            description,
+            members,
+        });
     }
     result
 }
@@ -375,8 +383,7 @@ fn delete_team(team: String) -> Result<(), String> {
     if !path.exists() {
         return Err(format!("team '{team}' not found"));
     }
-    std::fs::remove_dir_all(&path)
-        .map_err(|e| format!("failed to delete team '{team}': {e}"))
+    std::fs::remove_dir_all(&path).map_err(|e| format!("failed to delete team '{team}': {e}"))
 }
 
 #[tauri::command]
@@ -390,10 +397,7 @@ fn get_config(state: State<'_, Arc<Mutex<AppState>>>) -> AppConfig {
 }
 
 #[tauri::command]
-fn save_config(
-    state: State<'_, Arc<Mutex<AppState>>>,
-    config: AppConfig,
-) -> Result<(), String> {
+fn save_config(state: State<'_, Arc<Mutex<AppState>>>, config: AppConfig) -> Result<(), String> {
     config.save()?;
     state.lock().unwrap().config = config;
     Ok(())
@@ -437,29 +441,50 @@ fn create_debate(
 
     // Archive existing inbox messages for this team so the new debate
     // starts clean while old logs are preserved for reference.
-    let team_dir = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
-        .join(".claude")
-        .join("teams")
-        .join(&team);
+    let team_dir =
+        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
+            .join(".claude")
+            .join("teams")
+            .join(&team);
     let inbox_dir = team_dir.join("inboxes");
     if inbox_dir.exists() {
         let has_json = std::fs::read_dir(&inbox_dir)
             .ok()
-            .map(|mut e| e.any(|f| f.ok().map(|f| f.path().extension().map(|x| x == "json").unwrap_or(false)).unwrap_or(false)))
+            .map(|mut e| {
+                e.any(|f| {
+                    f.ok()
+                        .map(|f| f.path().extension().map(|x| x == "json").unwrap_or(false))
+                        .unwrap_or(false)
+                })
+            })
             .unwrap_or(false);
         if has_json {
             // Name the archive folder after the debate topic (slugified),
             // with a numeric suffix if that folder already exists.
-            let topic_raw = config.topics.first().map(String::as_str).unwrap_or("debate");
+            let topic_raw = config
+                .topics
+                .first()
+                .map(String::as_str)
+                .unwrap_or("debate");
             let slug: String = topic_raw
                 .chars()
-                .map(|c| if c.is_alphanumeric() || c == '-' { c.to_ascii_lowercase() } else { '-' })
+                .map(|c| {
+                    if c.is_alphanumeric() || c == '-' {
+                        c.to_ascii_lowercase()
+                    } else {
+                        '-'
+                    }
+                })
                 .collect::<String>()
                 .split('-')
                 .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
                 .join("-");
-            let slug = if slug.is_empty() { "debate".to_string() } else { slug };
+            let slug = if slug.is_empty() {
+                "debate".to_string()
+            } else {
+                slug
+            };
             let archive_base = team_dir.join("archive");
             let mut archive_dir = archive_base.join(&slug);
             let mut n = 2u32;
@@ -509,10 +534,7 @@ fn start_debate_cmd(
 }
 
 #[tauri::command]
-fn stop_debate(
-    state: State<'_, Arc<Mutex<AppState>>>,
-    team: String,
-) -> Result<(), String> {
+fn stop_debate(state: State<'_, Arc<Mutex<AppState>>>, team: String) -> Result<(), String> {
     let st = state.lock().unwrap();
     let ds = st
         .debates
@@ -524,10 +546,7 @@ fn stop_debate(
 }
 
 #[tauri::command]
-fn pause_debate(
-    state: State<'_, Arc<Mutex<AppState>>>,
-    team: String,
-) -> Result<(), String> {
+fn pause_debate(state: State<'_, Arc<Mutex<AppState>>>, team: String) -> Result<(), String> {
     let st = state.lock().unwrap();
     let ds = st
         .debates
@@ -603,19 +622,16 @@ fn get_debate_status(
 }
 
 #[tauri::command]
-fn enhance_topic(
-    state: State<'_, Arc<Mutex<AppState>>>,
-    text: String,
-) -> Result<String, String> {
+fn enhance_topic(state: State<'_, Arc<Mutex<AppState>>>, text: String) -> Result<String, String> {
     // CC first — no key needed and it's the primary use case for Agora.
     // Falls back through API-key providers in order.
     const PRIORITY: &[(&str, &str)] = &[
         ("claude-code", "haiku"),
-        ("anthropic",   "claude-haiku-4-5-20251001"),
-        ("groq",        "llama-3.3-70b-versatile"),
-        ("openai",      "gpt-4o-mini"),
-        ("gemini",      "gemini-2.0-flash"),
-        ("openrouter",  "meta-llama/llama-3.3-70b-instruct:free"),
+        ("anthropic", "claude-haiku-4-5-20251001"),
+        ("groq", "llama-3.3-70b-versatile"),
+        ("openai", "gpt-4o-mini"),
+        ("gemini", "gemini-2.0-flash"),
+        ("openrouter", "meta-llama/llama-3.3-70b-instruct:free"),
     ];
 
     let config = { state.lock().unwrap().config.clone() };
@@ -623,7 +639,8 @@ fn enhance_topic(
     // Use user-configured provider if set, otherwise auto-select from priority list.
     let (provider_name, model): (String, String) = if !config.enhance_provider.is_empty() {
         let model = if config.enhance_model.is_empty() {
-            PRIORITY.iter()
+            PRIORITY
+                .iter()
                 .find(|(p, _)| *p == config.enhance_provider.as_str())
                 .map(|(_, m)| m.to_string())
                 .unwrap_or_else(|| "haiku".to_string())
@@ -713,24 +730,24 @@ fn main() {
         .manage(shared_state)
         .manage(shared_hashes)
         .invoke_handler(tauri::generate_handler![
-                get_teams,
-                delete_team,
-                list_team_configs,
-                get_messages,
-                get_config,
-                save_config,
-                list_models,
-                list_role_presets,
-                list_debate_presets,
-                create_debate,
-                start_debate_cmd,
-                stop_debate,
-                pause_debate,
-                restart_debate,
-                get_debate_status,
-                enhance_topic,
-                show_main_and_close_splash,
-            ])
+            get_teams,
+            delete_team,
+            list_team_configs,
+            get_messages,
+            get_config,
+            save_config,
+            list_models,
+            list_role_presets,
+            list_debate_presets,
+            create_debate,
+            start_debate_cmd,
+            stop_debate,
+            pause_debate,
+            restart_debate,
+            get_debate_status,
+            enhance_topic,
+            show_main_and_close_splash,
+        ])
         .setup(move |app| {
             let handle: AppHandle = app.handle().clone();
             let state = state_for_setup.clone();
@@ -740,14 +757,18 @@ fn main() {
             if let Some(main) = app.get_webview_window("main") {
                 let _ = main.hide();
             }
-            let _ = tauri::WebviewWindowBuilder::new(app, "splash", tauri::WebviewUrl::App("splash.html".into()))
-                .title("")
-                .inner_size(464.0, 688.0)
-                .decorations(false)
-                .resizable(false)
-                .center()
-                .always_on_top(true)
-                .build();
+            let _ = tauri::WebviewWindowBuilder::new(
+                app,
+                "splash",
+                tauri::WebviewUrl::App("splash.html".into()),
+            )
+            .title("")
+            .inner_size(464.0, 688.0)
+            .decorations(false)
+            .resizable(false)
+            .center()
+            .always_on_top(true)
+            .build();
 
             // Initial scan on the calling thread (fast)
             {

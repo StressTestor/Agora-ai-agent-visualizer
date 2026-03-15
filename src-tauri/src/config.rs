@@ -76,8 +76,7 @@ impl AppConfig {
     pub fn save(&self) -> Result<(), String> {
         let path = config_path();
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("failed to create config dir: {e}"))?;
+            fs::create_dir_all(parent).map_err(|e| format!("failed to create config dir: {e}"))?;
         }
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("failed to serialize config: {e}"))?;
