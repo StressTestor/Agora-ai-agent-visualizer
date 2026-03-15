@@ -120,7 +120,12 @@ fn now_ms() -> u64 {
 // ---------------------------------------------------------------------------
 
 const AUTHORITY_ROLES: &[&str] = &[
-    "moderator", "synthesizer", "arbiter", "mediator", "judge", "facilitator",
+    "moderator",
+    "synthesizer",
+    "arbiter",
+    "mediator",
+    "judge",
+    "facilitator",
 ];
 
 fn is_authority_role(role: &str) -> bool {
@@ -239,13 +244,20 @@ fn normalize_context(context: Vec<ChatMessage>) -> Vec<ChatMessage> {
 
 fn build_context(state: &DebateState, agent: &AgentConfig) -> Vec<ChatMessage> {
     // Count how many times this agent has spoken so far (0-indexed turn count)
-    let my_turn_count = state.messages.iter().filter(|m| m.from == agent.name).count();
+    let my_turn_count = state
+        .messages
+        .iter()
+        .filter(|m| m.from == agent.name)
+        .count();
 
     let hidden = hidden_debate_instructions(agent, &state.config.agents, my_turn_count);
 
     // Embed topic + hidden protocol in system prompt
     let system_content = if let Some(topic) = state.config.topics.get(state.current_topic_idx) {
-        format!("{}\n\ncurrent debate topic: {topic}\n\n{hidden}", agent.system_prompt)
+        format!(
+            "{}\n\ncurrent debate topic: {topic}\n\n{hidden}",
+            agent.system_prompt
+        )
     } else {
         format!("{}\n\n{hidden}", agent.system_prompt)
     };
@@ -345,7 +357,13 @@ fn team_inbox_dir(team: &str) -> PathBuf {
 
 fn safe_filename(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -441,9 +459,9 @@ pub fn start_debate(
                 let state = debate_state.lock().unwrap();
 
                 match &state.status {
-                    DebateStatus::Stopped
-                    | DebateStatus::Converged
-                    | DebateStatus::Error(_) => break,
+                    DebateStatus::Stopped | DebateStatus::Converged | DebateStatus::Error(_) => {
+                        break
+                    }
                     DebateStatus::Paused => {
                         drop(state);
                         std::thread::sleep(std::time::Duration::from_millis(500));
@@ -491,10 +509,13 @@ pub fn start_debate(
             };
 
             // Signal to frontend that this agent is waiting for a response
-            let _ = handle.emit("debate-thinking", DebateThinkingEvent {
-                team: team_name.clone(),
-                agent: agent_config.name.clone(),
-            });
+            let _ = handle.emit(
+                "debate-thinking",
+                DebateThinkingEvent {
+                    team: team_name.clone(),
+                    agent: agent_config.name.clone(),
+                },
+            );
 
             let response = 'call: {
                 let mut last_err = None;
@@ -503,11 +524,14 @@ pub fn start_debate(
                     let agent_name = agent_config.name.clone();
                     let team_ref = team_name.clone();
                     let mut on_chunk = |chunk: &str| {
-                        let _ = handle_ref.emit("debate-message-chunk", DebateChunkEvent {
-                            team: team_ref.clone(),
-                            agent: agent_name.clone(),
-                            chunk: chunk.to_string(),
-                        });
+                        let _ = handle_ref.emit(
+                            "debate-message-chunk",
+                            DebateChunkEvent {
+                                team: team_ref.clone(),
+                                agent: agent_name.clone(),
+                                chunk: chunk.to_string(),
+                            },
+                        );
                     };
                     match provider.chat_streaming(&context, &agent_config.model, &mut on_chunk) {
                         Ok(text) => break 'call text,
@@ -574,15 +598,18 @@ pub fn start_debate(
             }
 
             // Emit complete event so frontend can finalise the streaming bubble
-            let _ = handle.emit("debate-message-complete", DebateMessageCompleteEvent {
-                team: msg.team.clone(),
-                agent: msg.from.clone(),
-                from: msg.from.clone(),
-                to: msg.to.clone(),
-                content: msg.content.clone(),
-                timestamp: msg.timestamp,
-                role: msg.role.clone(),
-            });
+            let _ = handle.emit(
+                "debate-message-complete",
+                DebateMessageCompleteEvent {
+                    team: msg.team.clone(),
+                    agent: msg.from.clone(),
+                    from: msg.from.clone(),
+                    to: msg.to.clone(),
+                    content: msg.content.clone(),
+                    timestamp: msg.timestamp,
+                    role: msg.role.clone(),
+                },
+            );
 
             // Persist to disk — file watcher will skip due to pre-inserted hash
             persist_message(&msg);
