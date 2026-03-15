@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::io::BufRead;
 use std::time::Duration;
-use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Shared types
@@ -192,8 +192,9 @@ impl Provider for OpenAiCompatible {
             .text()
             .map_err(|e| ProviderError::Other(format!("failed to read response body: {e}")))?;
 
-        let parsed: OpenAiResponse = serde_json::from_str(&body)
-            .map_err(|e| ProviderError::Other(format!("failed to parse response: {e} | body: {body}")))?;
+        let parsed: OpenAiResponse = serde_json::from_str(&body).map_err(|e| {
+            ProviderError::Other(format!("failed to parse response: {e} | body: {body}"))
+        })?;
 
         parsed
             .choices
@@ -297,7 +298,9 @@ impl Provider for OpenAiCompatible {
         }
 
         if accumulated.is_empty() {
-            return Err(ProviderError::Other("stream ended with no content".to_string()));
+            return Err(ProviderError::Other(
+                "stream ended with no content".to_string(),
+            ));
         }
         Ok(accumulated)
     }
@@ -466,14 +469,24 @@ impl Provider for AnthropicClient {
         if !resp.status().is_success() {
             // Coding plan fallback
             if self.base_url.contains("minimax") {
-                return Ok(vec![
-                    ModelInfo { id: "MiniMax-M2.5".to_string(), provider: "minimax-coding".to_string() },
-                ]);
+                return Ok(vec![ModelInfo {
+                    id: "MiniMax-M2.5".to_string(),
+                    provider: "minimax-coding".to_string(),
+                }]);
             }
             return Ok(vec![
-                ModelInfo { id: "claude-opus-4-6".to_string(), provider: "anthropic".to_string() },
-                ModelInfo { id: "claude-sonnet-4-6".to_string(), provider: "anthropic".to_string() },
-                ModelInfo { id: "claude-haiku-4-5-20251001".to_string(), provider: "anthropic".to_string() },
+                ModelInfo {
+                    id: "claude-opus-4-6".to_string(),
+                    provider: "anthropic".to_string(),
+                },
+                ModelInfo {
+                    id: "claude-sonnet-4-6".to_string(),
+                    provider: "anthropic".to_string(),
+                },
+                ModelInfo {
+                    id: "claude-haiku-4-5-20251001".to_string(),
+                    provider: "anthropic".to_string(),
+                },
             ]);
         }
 
@@ -573,7 +586,9 @@ impl Provider for AnthropicClient {
         }
 
         if accumulated.is_empty() {
-            return Err(ProviderError::Other("stream ended with no content".to_string()));
+            return Err(ProviderError::Other(
+                "stream ended with no content".to_string(),
+            ));
         }
         Ok(accumulated)
     }
@@ -597,10 +612,7 @@ impl Provider for ClaudeCodeProvider {
             .map(|m| m.content.as_str())
             .unwrap_or("");
 
-        let conv: Vec<&ChatMessage> = messages
-            .iter()
-            .filter(|m| m.role != "system")
-            .collect();
+        let conv: Vec<&ChatMessage> = messages.iter().filter(|m| m.role != "system").collect();
 
         if conv.is_empty() {
             return Err(ProviderError::Other("no messages to send".to_string()));
@@ -613,7 +625,11 @@ impl Provider for ClaudeCodeProvider {
         } else {
             conv.iter()
                 .map(|m| {
-                    let label = if m.role == "assistant" { "you" } else { "other" };
+                    let label = if m.role == "assistant" {
+                        "you"
+                    } else {
+                        "other"
+                    };
                     format!("[{label}]: {}", m.content)
                 })
                 .collect::<Vec<_>>()
@@ -633,11 +649,16 @@ impl Provider for ClaudeCodeProvider {
 
         let mut cmd = std::process::Command::new(claude_bin);
         cmd.args([
-            "-p", &prompt,
-            "--model", model,
-            "--output-format", "json",
-            "--max-turns", "1",
-            "--tools", "",
+            "-p",
+            &prompt,
+            "--model",
+            model,
+            "--output-format",
+            "json",
+            "--max-turns",
+            "1",
+            "--tools",
+            "",
             "--no-session-persistence",
             "--disable-slash-commands",
         ]);
@@ -665,8 +686,12 @@ impl Provider for ClaudeCodeProvider {
             Ok(Ok(o)) => o,
             Ok(Err(e)) => return Err(ProviderError::Network(format!("claude CLI error: {e}"))),
             Err(_) => {
-                unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL); }
-                return Err(ProviderError::Other("claude CLI timed out after 120s".to_string()));
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                }
+                return Err(ProviderError::Other(
+                    "claude CLI timed out after 120s".to_string(),
+                ));
             }
         };
 
@@ -697,10 +722,7 @@ impl Provider for ClaudeCodeProvider {
             .map(|m| m.content.as_str())
             .unwrap_or("");
 
-        let conv: Vec<&ChatMessage> = messages
-            .iter()
-            .filter(|m| m.role != "system")
-            .collect();
+        let conv: Vec<&ChatMessage> = messages.iter().filter(|m| m.role != "system").collect();
 
         if conv.is_empty() {
             return Err(ProviderError::Other("no messages to send".to_string()));
@@ -711,7 +733,11 @@ impl Provider for ClaudeCodeProvider {
         } else {
             conv.iter()
                 .map(|m| {
-                    let label = if m.role == "assistant" { "you" } else { "other" };
+                    let label = if m.role == "assistant" {
+                        "you"
+                    } else {
+                        "other"
+                    };
                     format!("[{label}]: {}", m.content)
                 })
                 .collect::<Vec<_>>()
@@ -730,13 +756,18 @@ impl Provider for ClaudeCodeProvider {
 
         let mut cmd = std::process::Command::new(claude_bin);
         cmd.args([
-            "-p", &prompt,
-            "--model", model,
-            "--output-format", "stream-json",
+            "-p",
+            &prompt,
+            "--model",
+            model,
+            "--output-format",
+            "stream-json",
             "--verbose",
             "--include-partial-messages",
-            "--max-turns", "1",
-            "--tools", "",
+            "--max-turns",
+            "1",
+            "--tools",
+            "",
             "--no-session-persistence",
             "--disable-slash-commands",
         ]);
@@ -753,14 +784,18 @@ impl Provider for ClaudeCodeProvider {
             .map_err(|e| ProviderError::Network(format!("failed to run claude CLI: {e}")))?;
 
         let pid = child.id();
-        let stdout = child.stdout.take()
+        let stdout = child
+            .stdout
+            .take()
             .ok_or_else(|| ProviderError::Other("failed to capture stdout".to_string()))?;
 
         // Spawn a kill timer — 120s max.
         let kill_pid = pid;
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(120));
-            unsafe { libc::kill(kill_pid as libc::pid_t, libc::SIGKILL); }
+            unsafe {
+                libc::kill(kill_pid as libc::pid_t, libc::SIGKILL);
+            }
         });
 
         let reader = std::io::BufReader::new(stdout);
@@ -807,15 +842,30 @@ impl Provider for ClaudeCodeProvider {
         let _ = child.wait();
 
         final_result
-            .or_else(|| if accumulated.is_empty() { None } else { Some(accumulated) })
+            .or_else(|| {
+                if accumulated.is_empty() {
+                    None
+                } else {
+                    Some(accumulated)
+                }
+            })
             .ok_or_else(|| ProviderError::Other("no output from claude CLI stream".to_string()))
     }
 
     fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         Ok(vec![
-            ModelInfo { id: "haiku".to_string(), provider: "claude-code".to_string() },
-            ModelInfo { id: "sonnet".to_string(), provider: "claude-code".to_string() },
-            ModelInfo { id: "opus".to_string(), provider: "claude-code".to_string() },
+            ModelInfo {
+                id: "haiku".to_string(),
+                provider: "claude-code".to_string(),
+            },
+            ModelInfo {
+                id: "sonnet".to_string(),
+                provider: "claude-code".to_string(),
+            },
+            ModelInfo {
+                id: "opus".to_string(),
+                provider: "claude-code".to_string(),
+            },
         ])
     }
 }
@@ -833,7 +883,8 @@ pub fn build_provider(name: &str, api_key: &str) -> Option<Box<dyn Provider>> {
             api_key,
             "https://api.minimax.io/anthropic",
         ))),
-        "openai" | "openrouter" | "groq" | "opencode" | "deepseek" | "moonshot" | "minimax" | "zai" | "zai-coding" | "gemini" => {
+        "openai" | "openrouter" | "groq" | "opencode" | "deepseek" | "moonshot" | "minimax"
+        | "zai" | "zai-coding" | "gemini" => {
             OpenAiCompatible::for_provider(name, api_key).map(|p| Box::new(p) as Box<dyn Provider>)
         }
         _ => None,
