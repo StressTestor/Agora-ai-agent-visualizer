@@ -1,6 +1,6 @@
 [package]
 name = "agora"
-version = "0.3.3"
+version = "0.4.0"
 edition = "2021"
 
 [build-dependencies]
@@ -15,3 +15,6 @@ notify = "6"
 chrono = "0.4"
 reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls", "gzip", "brotli", "deflate"] }
 libc = "0.2"
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.29"
+crossterm = "0.28"

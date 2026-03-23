@@ -49,6 +49,32 @@ or grab the DMG from [releases](https://github.com/StressTestor/Agora-ai-agent-v
 - pause/resume/stop/restart controls
 - API keys stored locally at `~/.config/agora/config.json`
 
+**CLI / TUI mode** — run debates from the terminal
+
+no GUI needed. the same binary doubles as a CLI tool with a full ratatui TUI for streaming debates in the terminal.
+
+```bash
+# run a debate with the TUI (default)
+agora debate \
+  --name rust-vs-go \
+  --agent model-a:groq:llama-3.3-70b-versatile:debater \
+  --agent model-b:gemini:gemini-2.5-flash:debater \
+  --judge judge:opencode:mimo-v2-pro-free \
+  --topic "Is Rust better than Go for backend services?" \
+  --rounds 5
+
+# plain text mode (no TUI, just streaming output)
+agora debate --plain ...
+
+# list available presets
+agora list-presets
+
+# list models for a provider
+agora list-models groq
+```
+
+TUI features: agent-colored chat panels, per-turn timing, markdown rendering, vi-style scroll (j/k/PgUp/PgDn), live streaming with cursor indicator. press q to quit (debate thread stops immediately).
+
 **27 role presets across 7 categories**
 
 | category | roles |
@@ -117,6 +143,8 @@ CARGO_TARGET_DIR=/Volumes/yourDrive/.cargo-tmp cargo tauri build
 ## stack
 
 - tauri 2 (rust backend, webview frontend)
+- ratatui 0.29 + crossterm 0.28 (terminal UI)
+- clap 4 (CLI argument parsing)
 - notify 6 (FSEvents watcher)
 - reqwest 0.12 (blocking HTTP for provider calls)
 - vanilla HTML/CSS/JS frontend — no framework, no bundler
