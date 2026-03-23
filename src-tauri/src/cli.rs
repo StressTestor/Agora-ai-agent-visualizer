@@ -1,3 +1,5 @@
+use clap::{Parser, Subcommand};
+
 use crate::config::AppConfig;
 use crate::orchestrator::{AgentConfig, DebateConfig, DebateState, DebateStatus};
 use crate::presets;
@@ -25,243 +27,83 @@ fn agent_color(idx: usize) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// Clap CLI definition
+// ---------------------------------------------------------------------------
+
+#[derive(Parser)]
+#[command(name = "agora", about = "model debate arena")]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    /// Run a debate between models
+    Debate(DebateArgs),
+    /// Show available debate presets
+    ListPresets,
+    /// List models for a provider
+    ListModels {
+        /// Provider name (e.g., groq, openrouter)
+        provider: String,
+    },
+}
+
+#[derive(clap::Args)]
+pub struct DebateArgs {
+    /// Debate name
+    #[arg(short, long)]
+    pub name: String,
+
+    /// Use a debate preset (e.g., 1v1-duel)
+    #[arg(short, long)]
+    pub preset: Option<String>,
+
+    /// Agent as name:provider:model[:role] (repeatable)
+    #[arg(short, long, num_args = 1)]
+    pub agent: Vec<String>,
+
+    /// Judge as name:provider:model (repeatable)
+    #[arg(short, long, num_args = 1)]
+    pub judge: Vec<String>,
+
+    /// Debate topic (repeatable)
+    #[arg(short = 'T', long)]
+    pub topic: Vec<String>,
+
+    /// Max rounds (default: 10)
+    #[arg(short, long, default_value_t = 10)]
+    pub rounds: u32,
+
+    /// Termination mode: fixed|convergence|topic|manual
+    #[arg(long, default_value = "convergence")]
+    pub termination: String,
+
+    /// Visibility mode: group|directed
+    #[arg(long, default_value = "group")]
+    pub visibility: String,
+
+    /// Don't write to ~/.claude/teams/
+    #[arg(long)]
+    pub no_persist: bool,
+
+    /// Plain text output (no TUI)
+    #[arg(long)]
+    pub plain: bool,
+}
+
+// ---------------------------------------------------------------------------
 // CLI entry point
 // ---------------------------------------------------------------------------
 
-pub fn run_cli(args: &[String]) -> Result<(), String> {
-    if args.is_empty() {
-        return Err(cli_help());
+pub fn run_cli() -> Result<(), String> {
+    let cli = Cli::parse();
+    match cli.command {
+        Commands::Debate(args) => cmd_debate(args),
+        Commands::ListPresets => cmd_list_presets(),
+        Commands::ListModels { provider } => cmd_list_models(&provider),
     }
-
-    match args[0].as_str() {
-        "debate" => cmd_debate(&args[1..]),
-        "list-presets" => cmd_list_presets(),
-        "list-models" => {
-            if args.len() < 2 {
-                return Err("usage: agora list-models <provider>".to_string());
-            }
-            cmd_list_models(&args[1])
-        }
-        "help" | "--help" | "-h" => Err(cli_help()),
-        other => Err(format!("unknown command: {other}\n\n{}", cli_help())),
-    }
-}
-
-fn cli_help() -> String {
-    format!(
-        "{BOLD}agora{RESET} — model debate arena
-
-{BOLD}commands:{RESET}
-  debate          run a debate between models
-  list-presets    show available debate presets
-  list-models     list models for a provider
-
-{BOLD}debate usage:{RESET}
-  agora debate [options]
-
-  {DIM}--name <NAME>{RESET}           debate name (required)
-  {DIM}--preset <PRESET>{RESET}        use a debate preset (e.g., 1v1-duel)
-  {DIM}--agent <SPEC>{RESET}           agent as name:provider:model[:role] (repeatable)
-  {DIM}--judge <SPEC>{RESET}           judge as name:provider:model
-  {DIM}--topic <TOPIC>{RESET}          debate topic (repeatable)
-  {DIM}--rounds <N>{RESET}             max rounds (default: 10)
-  {DIM}--termination <MODE>{RESET}     fixed|convergence|topic|manual (default: convergence)
-  {DIM}--visibility <MODE>{RESET}      group|directed (default: group)
-  {DIM}--no-persist{RESET}             don't write to ~/.claude/teams/
-
-{BOLD}examples:{RESET}
-  agora debate \\
-    --name rust-vs-go \\
-    --agent model-a:openrouter:meta-llama/llama-3.3-70b-instruct:free:debater \\
-    --agent model-b:gemini:gemini-2.5-flash:debater \\
-    --judge judge:opencode:mimo-v2-pro-free \\
-    --topic \"Is Rust better than Go for backend services?\" \\
-    --rounds 5
-
-  agora debate \\
-    --preset 1v1-duel \\
-    --name quick-test \\
-    --agent model-a:groq:llama-3.3-70b-versatile:debater \\
-    --agent model-b:gemini:gemini-2.5-flash:debater \\
-    --judge judge:opencode:mimo-v2-pro-free \\
-    --topic \"Tabs vs spaces\"
-"
-    )
-}
-
-// ---------------------------------------------------------------------------
-// Parse debate args (hand-rolled to keep it simple + flexible)
-// ---------------------------------------------------------------------------
-
-struct DebateArgs {
-    name: String,
-    _preset: Option<String>,
-    agents: Vec<AgentConfig>,
-    topics: Vec<String>,
-    rounds: u32,
-    termination: String,
-    visibility: String,
-    persist: bool,
-    plain: bool,
-}
-
-fn parse_debate_args(args: &[String]) -> Result<DebateArgs, String> {
-    let mut name = String::new();
-    let mut preset: Option<String> = None;
-    let mut agents: Vec<AgentConfig> = vec![];
-    let mut topics: Vec<String> = vec![];
-    let mut rounds: u32 = 10;
-    let mut termination = "convergence".to_string();
-    let mut visibility = "group".to_string();
-    let mut persist = true;
-    let mut plain = false;
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--name" | "-n" => {
-                i += 1;
-                name = args.get(i).cloned().ok_or("--name requires a value")?;
-            }
-            "--preset" | "-p" => {
-                i += 1;
-                preset = Some(args.get(i).cloned().ok_or("--preset requires a value")?);
-            }
-            "--agent" | "-a" => {
-                i += 1;
-                let spec = args.get(i).ok_or("--agent requires a value")?;
-                agents.push(parse_agent_spec(spec)?);
-            }
-            "--judge" | "-j" => {
-                i += 1;
-                let spec = args.get(i).ok_or("--judge requires a value")?;
-                let mut agent = parse_agent_spec(spec)?;
-                agent.role = "judge".to_string();
-                // Inject default judge prompt if none
-                if agent.system_prompt.is_empty() {
-                    if let Some(role) = presets::role_presets().iter().find(|r| r.name == "judge") {
-                        agent.system_prompt = role.system_prompt.clone();
-                    }
-                }
-                agents.push(agent);
-            }
-            "--topic" | "-T" => {
-                i += 1;
-                topics.push(args.get(i).cloned().ok_or("--topic requires a value")?);
-            }
-            "--rounds" | "-r" => {
-                i += 1;
-                rounds = args
-                    .get(i)
-                    .ok_or("--rounds requires a value")?
-                    .parse()
-                    .map_err(|_| "--rounds must be a number")?;
-            }
-            "--termination" => {
-                i += 1;
-                termination = args.get(i).cloned().ok_or("--termination requires a value")?;
-            }
-            "--visibility" => {
-                i += 1;
-                visibility = args.get(i).cloned().ok_or("--visibility requires a value")?;
-            }
-            "--no-persist" => {
-                persist = false;
-            }
-            "--plain" => {
-                plain = true;
-            }
-            other => {
-                return Err(format!("unknown option: {other}"));
-            }
-        }
-        i += 1;
-    }
-
-    if name.is_empty() {
-        return Err("--name is required".to_string());
-    }
-
-    // Apply preset defaults if specified
-    if let Some(ref preset_name) = preset {
-        let debate_presets = presets::debate_presets();
-        let found = debate_presets
-            .iter()
-            .find(|p| p.name == *preset_name || p.name.replace(' ', "-") == *preset_name)
-            .ok_or_else(|| format!("unknown preset: {preset_name}"))?;
-
-        if termination == "convergence" {
-            termination = found.termination.clone();
-        }
-        if rounds == 10 {
-            rounds = found.default_rounds;
-        }
-        visibility = found.visibility.clone();
-
-        // If no agents specified, apply preset agent templates
-        if agents.is_empty() {
-            for pa in &found.agents {
-                let role_preset = presets::role_presets()
-                    .into_iter()
-                    .find(|r| r.name == pa.role);
-                agents.push(AgentConfig {
-                    name: pa.name.clone(),
-                    provider: String::new(),
-                    model: String::new(),
-                    system_prompt: role_preset
-                        .map(|r| r.system_prompt)
-                        .unwrap_or_default(),
-                    role: pa.role.clone(),
-                });
-            }
-        }
-    }
-
-    // Inject role prompts for agents missing system_prompt
-    let role_presets = presets::role_presets();
-    for agent in &mut agents {
-        if agent.system_prompt.is_empty() && !agent.role.is_empty() {
-            if let Some(rp) = role_presets.iter().find(|r| r.name == agent.role) {
-                agent.system_prompt = rp.system_prompt.clone();
-            }
-        }
-    }
-
-    if agents.len() < 2 {
-        return Err("at least 2 agents required (use --agent and/or --judge)".to_string());
-    }
-    if topics.is_empty() {
-        return Err("at least one --topic is required".to_string());
-    }
-
-    // Validate providers
-    let config = AppConfig::load();
-    for agent in &agents {
-        if agent.provider.is_empty() {
-            return Err(format!(
-                "agent '{}' has no provider. specify as name:provider:model[:role]",
-                agent.name
-            ));
-        }
-        if config.api_key(&agent.provider).is_none() {
-            eprintln!(
-                "{YELLOW}warning:{RESET} no API key for provider '{}' (agent '{}')",
-                agent.provider, agent.name
-            );
-        }
-    }
-
-    Ok(DebateArgs {
-        name,
-        _preset: preset,
-        agents,
-        topics,
-        rounds,
-        termination,
-        visibility,
-        persist,
-        plain,
-    })
 }
 
 fn parse_agent_spec(spec: &str) -> Result<AgentConfig, String> {
@@ -337,38 +179,127 @@ fn cmd_list_models(provider_name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_debate(args: &[String]) -> Result<(), String> {
-    let parsed = parse_debate_args(args)?;
+fn cmd_debate(args: DebateArgs) -> Result<(), String> {
+    // Parse agent specs from --agent flags
+    let mut agents: Vec<AgentConfig> = Vec::new();
+    for spec in &args.agent {
+        agents.push(parse_agent_spec(spec)?);
+    }
+
+    // Parse judge specs from --judge flags (force role to "judge")
+    for spec in &args.judge {
+        let mut agent = parse_agent_spec(spec)?;
+        agent.role = "judge".to_string();
+        // Inject default judge prompt if none
+        if agent.system_prompt.is_empty() {
+            if let Some(role) = presets::role_presets().iter().find(|r| r.name == "judge") {
+                agent.system_prompt = role.system_prompt.clone();
+            }
+        }
+        agents.push(agent);
+    }
+
+    let mut rounds = args.rounds;
+    let mut termination = args.termination.clone();
+    let mut visibility = args.visibility.clone();
+    let persist = !args.no_persist;
+
+    // Apply preset defaults if specified
+    if let Some(ref preset_name) = args.preset {
+        let debate_presets = presets::debate_presets();
+        let found = debate_presets
+            .iter()
+            .find(|p| p.name == *preset_name || p.name.replace(' ', "-") == *preset_name)
+            .ok_or_else(|| format!("unknown preset: {preset_name}"))?;
+
+        if termination == "convergence" {
+            termination = found.termination.clone();
+        }
+        if rounds == 10 {
+            rounds = found.default_rounds;
+        }
+        visibility = found.visibility.clone();
+
+        // If no agents specified, apply preset agent templates
+        if agents.is_empty() {
+            for pa in &found.agents {
+                let role_preset = presets::role_presets()
+                    .into_iter()
+                    .find(|r| r.name == pa.role);
+                agents.push(AgentConfig {
+                    name: pa.name.clone(),
+                    provider: String::new(),
+                    model: String::new(),
+                    system_prompt: role_preset
+                        .map(|r| r.system_prompt)
+                        .unwrap_or_default(),
+                    role: pa.role.clone(),
+                });
+            }
+        }
+    }
+
+    // Inject role prompts for agents missing system_prompt
+    let role_presets = presets::role_presets();
+    for agent in &mut agents {
+        if agent.system_prompt.is_empty() && !agent.role.is_empty() {
+            if let Some(rp) = role_presets.iter().find(|r| r.name == agent.role) {
+                agent.system_prompt = rp.system_prompt.clone();
+            }
+        }
+    }
+
+    if agents.len() < 2 {
+        return Err("at least 2 agents required (use --agent and/or --judge)".to_string());
+    }
+    if args.topic.is_empty() {
+        return Err("at least one --topic is required".to_string());
+    }
+
+    // Validate providers
+    let config = AppConfig::load();
+    for agent in &agents {
+        if agent.provider.is_empty() {
+            return Err(format!(
+                "agent '{}' has no provider. specify as name:provider:model[:role]",
+                agent.name
+            ));
+        }
+        if config.api_key(&agent.provider).is_none() {
+            eprintln!(
+                "{YELLOW}warning:{RESET} no API key for provider '{}' (agent '{}')",
+                agent.provider, agent.name
+            );
+        }
+    }
 
     let debate_config = DebateConfig {
-        team_name: parsed.name.clone(),
-        agents: parsed.agents.clone(),
-        topics: parsed.topics.clone(),
-        visibility: parsed.visibility.clone(),
-        termination: parsed.termination.clone(),
-        max_rounds: parsed.rounds,
+        team_name: args.name.clone(),
+        agents: agents.clone(),
+        topics: args.topic.clone(),
+        visibility: visibility.clone(),
+        termination: termination.clone(),
+        max_rounds: rounds,
         convergence_threshold: 2,
     };
 
     // TUI mode (default) vs plain text mode
-    if !parsed.plain {
+    if !args.plain {
         return crate::tui::run_tui_debate(
             debate_config,
-            parsed.agents,
-            parsed.persist,
+            agents,
+            persist,
         );
     }
-
-    let config = AppConfig::load();
 
     // Plain text mode — print header
     println!();
     println!(
         "  {BOLD}{CYAN}▸ {}{RESET}",
-        parsed.name
+        args.name
     );
     println!();
-    for (i, agent) in parsed.agents.iter().enumerate() {
+    for (i, agent) in agents.iter().enumerate() {
         let color = agent_color(i);
         println!(
             "    {color}●{RESET} {BOLD}{}{RESET}  {DIM}{} / {}{RESET}  {DIM}[{}]{RESET}",
@@ -376,20 +307,19 @@ fn cmd_debate(args: &[String]) -> Result<(), String> {
         );
     }
     println!();
-    for (i, topic) in parsed.topics.iter().enumerate() {
+    for (i, topic) in args.topic.iter().enumerate() {
         println!("    topic {}: {}", i + 1, topic);
     }
     println!(
         "    {DIM}rounds: {} | termination: {} | visibility: {}{RESET}",
-        parsed.rounds, debate_config.termination, debate_config.visibility
+        rounds, debate_config.termination, debate_config.visibility
     );
     println!();
     println!("  {DIM}─────────────────────────────────────────{RESET}");
     println!();
 
     // Build providers
-    let providers: Vec<Option<Box<dyn Provider>>> = parsed
-        .agents
+    let providers: Vec<Option<Box<dyn Provider>>> = agents
         .iter()
         .map(|agent| {
             let api_key = config.api_key(&agent.provider).unwrap_or_default();
@@ -402,7 +332,7 @@ fn cmd_debate(args: &[String]) -> Result<(), String> {
         if p.is_none() {
             return Err(format!(
                 "no provider configured for agent '{}'",
-                parsed.agents[i].name
+                agents[i].name
             ));
         }
     }
@@ -413,7 +343,7 @@ fn cmd_debate(args: &[String]) -> Result<(), String> {
     state.current_round = 1;
 
     // Persist to disk if requested
-    if parsed.persist {
+    if persist {
         crate::orchestrator::init_team_on_disk(&debate_config);
     }
 
@@ -490,7 +420,7 @@ fn cmd_debate(args: &[String]) -> Result<(), String> {
         let msg = crate::orchestrator::make_message(&agent_config, &response, &debate_config, agent_idx, state.current_round);
 
         // Persist
-        if parsed.persist {
+        if persist {
             crate::orchestrator::persist_message(&msg);
         }
 
@@ -525,15 +455,118 @@ fn cmd_debate(args: &[String]) -> Result<(), String> {
         state.current_round.saturating_sub(1),
         state.messages.len()
     );
-    if parsed.persist {
+    if persist {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         println!(
             "  {DIM}saved to: ~/.claude/teams/{}/{RESET}",
-            parsed.name
+            args.name
         );
         let _ = home; // suppress warning
     }
     println!();
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn parse_minimal_debate() {
+        let args = Cli::parse_from([
+            "agora", "debate",
+            "--name", "test",
+            "--agent", "a:groq:llama-3.3-70b-versatile:debater",
+            "--agent", "b:groq:llama-3.3-70b-versatile:debater",
+            "--topic", "test topic",
+        ]);
+        match args.command {
+            Commands::Debate(d) => {
+                assert_eq!(d.name, "test");
+                assert_eq!(d.agent.len(), 2);
+                assert_eq!(d.topic.len(), 1);
+                assert_eq!(d.rounds, 10);
+            }
+            _ => panic!("expected debate command"),
+        }
+    }
+
+    #[test]
+    fn parse_agent_spec_valid_3_parts() {
+        let result = parse_agent_spec("model-a:openrouter:meta-llama/llama-3.3-70b-instruct");
+        assert!(result.is_ok());
+        let agent = result.unwrap();
+        assert_eq!(agent.name, "model-a");
+        assert_eq!(agent.provider, "openrouter");
+        assert_eq!(agent.model, "meta-llama/llama-3.3-70b-instruct");
+        assert_eq!(agent.role, "debater");
+    }
+
+    #[test]
+    fn parse_agent_spec_valid_4_parts() {
+        let result = parse_agent_spec("judge-1:groq:llama:judge");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().role, "judge");
+    }
+
+    #[test]
+    fn parse_agent_spec_invalid_too_few() {
+        let result = parse_agent_spec("only-one-part");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_with_preset() {
+        let args = Cli::parse_from([
+            "agora", "debate",
+            "--name", "test",
+            "--preset", "1v1-duel",
+            "--agent", "a:groq:model:debater",
+            "--agent", "b:groq:model:debater",
+            "--topic", "test",
+        ]);
+        match args.command {
+            Commands::Debate(d) => {
+                assert_eq!(d.preset, Some("1v1-duel".to_string()));
+            }
+            _ => panic!("expected debate command"),
+        }
+    }
+
+    #[test]
+    fn parse_plain_flag() {
+        let args = Cli::parse_from([
+            "agora", "debate",
+            "--name", "test",
+            "--agent", "a:groq:model:debater",
+            "--agent", "b:groq:model:debater",
+            "--topic", "test",
+            "--plain",
+        ]);
+        match args.command {
+            Commands::Debate(d) => assert!(d.plain),
+            _ => panic!("expected debate command"),
+        }
+    }
+
+    #[test]
+    fn list_presets_command() {
+        let args = Cli::parse_from(["agora", "list-presets"]);
+        assert!(matches!(args.command, Commands::ListPresets));
+    }
+
+    #[test]
+    fn list_models_command() {
+        let args = Cli::parse_from(["agora", "list-models", "groq"]);
+        match args.command {
+            Commands::ListModels { provider } => assert_eq!(provider, "groq"),
+            _ => panic!("expected list-models command"),
+        }
+    }
 }

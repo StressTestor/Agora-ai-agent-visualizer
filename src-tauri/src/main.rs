@@ -1,9 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod cli;
 mod config;
+mod model_profiles;
 mod orchestrator;
 mod presets;
 mod provider;
+mod tui;
 
 use chrono::DateTime;
 use config::AppConfig;
@@ -603,19 +606,21 @@ fn get_debate_status(
 }
 
 #[tauri::command]
-fn enhance_topic(
+async fn enhance_topic(
     state: State<'_, Arc<Mutex<AppState>>>,
     text: String,
 ) -> Result<String, String> {
-    // CC first — no key needed and it's the primary use case for Agora.
-    // Falls back through API-key providers in order.
+    // Prefer fast direct-API providers for topic refinement. CC CLI has ~15s overhead
+    // from MCP server loading which makes it a bad fit for single-shot calls.
+    // CC CLI is last resort — still works, just slow.
     const PRIORITY: &[(&str, &str)] = &[
-        ("claude-code", "haiku"),
-        ("anthropic",   "claude-haiku-4-5-20251001"),
         ("groq",        "llama-3.3-70b-versatile"),
-        ("openai",      "gpt-4o-mini"),
         ("gemini",      "gemini-2.0-flash"),
+        ("openai",      "gpt-4o-mini"),
+        ("anthropic",   "claude-haiku-4-5-20251001"),
         ("openrouter",  "meta-llama/llama-3.3-70b-instruct:free"),
+        ("opencode",    "minimax/MiniMax-M2.5"),
+        ("claude-code", "haiku"),
     ];
 
     let config = { state.lock().unwrap().config.clone() };
@@ -660,7 +665,12 @@ fn enhance_topic(
         },
     ];
 
-    provider.chat(&messages, &model).map_err(|e| e.to_string())
+    // Run on background thread to avoid blocking the main/UI thread
+    tauri::async_runtime::spawn_blocking(move || {
+        provider.chat(&messages, &model).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
 }
 
 #[tauri::command]
@@ -679,8 +689,20 @@ fn show_main_and_close_splash(app: AppHandle) {
 // ---------------------------------------------------------------------------
 
 fn main() {
+    // Check for CLI subcommands before launching the GUI
+    let args: Vec<String> = std::env::args().collect();
+    let cli_commands = ["debate", "list-presets", "list-models", "--help", "-h"];
+    if args.len() > 1 && cli_commands.contains(&args[1].as_str()) {
+        match cli::run_cli() {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let cli_team: Option<String> = {
-        let args: Vec<String> = std::env::args().collect();
         let mut team = None;
         for i in 0..args.len() {
             if (args[i] == "--team" || args[i] == "-t") && i + 1 < args.len() {
