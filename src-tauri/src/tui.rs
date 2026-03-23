@@ -16,7 +16,9 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::io::stdout;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
@@ -544,12 +546,15 @@ pub fn run_tui_debate(
         }
     }
 
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_clone = cancel.clone();
+
     let config_clone = debate_config.clone();
     std::thread::spawn(move || {
-        run_debate_thread(config_clone, providers, persist, tx);
+        run_debate_thread(config_clone, providers, persist, tx, cancel_clone);
     });
 
-    run_tui_loop(debate_config, rx)
+    run_tui_loop(debate_config, rx, cancel)
 }
 
 fn run_debate_thread(
@@ -557,6 +562,7 @@ fn run_debate_thread(
     providers: Vec<Option<Box<dyn Provider>>>,
     persist: bool,
     tx: mpsc::Sender<DebateEvent>,
+    cancel: Arc<AtomicBool>,
 ) {
     let mut state = DebateState::new(config.clone());
     state.status = DebateStatus::Running;
@@ -567,6 +573,10 @@ fn run_debate_thread(
     }
 
     'debate: loop {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+
         match &state.status {
             DebateStatus::Stopped | DebateStatus::Converged | DebateStatus::Error(_) => break,
             _ => {}
@@ -682,7 +692,10 @@ fn run_debate_thread(
             }
         }
 
-        std::thread::sleep(Duration::from_millis(300));
+        for _ in 0..6 {
+            if cancel.load(Ordering::Relaxed) { break 'debate; }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     let (status_str, rounds, messages) = match &state.status {
@@ -699,7 +712,7 @@ fn run_debate_thread(
     });
 }
 
-fn run_tui_loop(config: DebateConfig, rx: mpsc::Receiver<DebateEvent>) -> Result<(), String> {
+fn run_tui_loop(config: DebateConfig, rx: mpsc::Receiver<DebateEvent>, cancel: Arc<AtomicBool>) -> Result<(), String> {
     // Install panic hook BEFORE entering raw mode
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -721,7 +734,7 @@ fn run_tui_loop(config: DebateConfig, rx: mpsc::Receiver<DebateEvent>) -> Result
     let mut state = TuiState::new(&config);
     state.status = "running".to_string();
 
-    let result = run_event_loop(&mut terminal, &mut state, rx);
+    let result = run_event_loop(&mut terminal, &mut state, rx, cancel);
 
     // Discard our panic hook (default is reinstalled automatically)
     let _ = std::panic::take_hook();
@@ -745,6 +758,7 @@ fn run_event_loop(
     terminal: &mut Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     state: &mut TuiState,
     rx: mpsc::Receiver<DebateEvent>,
+    cancel: Arc<AtomicBool>,
 ) -> Result<(), String> {
     loop {
         terminal
@@ -845,8 +859,14 @@ fn run_event_loop(
         if event::poll(Duration::from_millis(30)).map_err(|e| format!("poll error: {e}"))? {
             if let Event::Key(key) = event::read().map_err(|e| format!("read error: {e}"))? {
                 match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                    KeyCode::Char('q') => {
+                        cancel.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        cancel.store(true, Ordering::Relaxed);
+                        break;
+                    }
                     KeyCode::Up | KeyCode::Char('k') => {
                         state.auto_scroll = false;
                         state.scroll_offset = state.scroll_offset.saturating_sub(3);
