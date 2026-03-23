@@ -42,7 +42,6 @@ impl std::fmt::Display for ProviderError {
 // ---------------------------------------------------------------------------
 
 pub trait Provider: Send + Sync {
-    fn name(&self) -> &str;
     fn chat(&self, messages: &[ChatMessage], model: &str) -> Result<String, ProviderError>;
     fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError>;
 
@@ -127,7 +126,21 @@ impl OpenAiCompatible {
             provider_name: provider_name.to_string(),
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
-            client: reqwest::blocking::Client::new(),
+            client: reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(120))
+                .build()
+                .unwrap_or_else(|_| reqwest::blocking::Client::new()),
+        }
+    }
+
+    /// Apply auth + provider-specific headers to a request builder.
+    fn apply_headers(&self, req: reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestBuilder {
+        let req = req.header("Authorization", format!("Bearer {}", self.api_key));
+        if self.provider_name == "openrouter" {
+            req.header("HTTP-Referer", "https://github.com/StressTestor/Agora-ai-agent-visualizer")
+                .header("X-Title", "Agora")
+        } else {
+            req
         }
     }
 
@@ -150,10 +163,6 @@ impl OpenAiCompatible {
 }
 
 impl Provider for OpenAiCompatible {
-    fn name(&self) -> &str {
-        &self.provider_name
-    }
-
     fn chat(&self, messages: &[ChatMessage], model: &str) -> Result<String, ProviderError> {
         let url = format!("{}/chat/completions", self.base_url);
         let body = OpenAiRequest {
@@ -163,9 +172,7 @@ impl Provider for OpenAiCompatible {
         };
 
         let resp = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .apply_headers(self.client.post(&url))
             .json(&body)
             .send()
             .map_err(|e| ProviderError::Network(e.to_string()))?;
@@ -205,9 +212,7 @@ impl Provider for OpenAiCompatible {
     fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         let url = format!("{}/models", self.base_url);
         let resp = self
-            .client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .apply_headers(self.client.get(&url))
             .send()
             .map_err(|e| ProviderError::Network(e.to_string()))?;
 
@@ -246,9 +251,7 @@ impl Provider for OpenAiCompatible {
         };
 
         let resp = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .apply_headers(self.client.post(&url))
             .json(&body)
             .send()
             .map_err(|e| ProviderError::Network(e.to_string()))?;
@@ -308,7 +311,6 @@ impl Provider for OpenAiCompatible {
 // ---------------------------------------------------------------------------
 
 pub struct AnthropicClient {
-    provider_name: String,
     api_key: String,
     base_url: String,
     client: reqwest::blocking::Client,
@@ -373,24 +375,22 @@ struct AnthropicModelEntry {
 
 impl AnthropicClient {
     pub fn new(api_key: &str) -> Self {
-        Self::with_base_url("anthropic", api_key, "https://api.anthropic.com")
+        Self::with_base_url(api_key, "https://api.anthropic.com")
     }
 
-    pub fn with_base_url(provider_name: &str, api_key: &str, base_url: &str) -> Self {
+    pub fn with_base_url(api_key: &str, base_url: &str) -> Self {
         Self {
-            provider_name: provider_name.to_string(),
             api_key: api_key.to_string(),
             base_url: base_url.trim_end_matches('/').to_string(),
-            client: reqwest::blocking::Client::new(),
+            client: reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(120))
+                .build()
+                .unwrap_or_else(|_| reqwest::blocking::Client::new()),
         }
     }
 }
 
 impl Provider for AnthropicClient {
-    fn name(&self) -> &str {
-        &self.provider_name
-    }
-
     fn chat(&self, messages: &[ChatMessage], model: &str) -> Result<String, ProviderError> {
         let system = messages
             .iter()
@@ -586,10 +586,6 @@ impl Provider for AnthropicClient {
 pub struct ClaudeCodeProvider;
 
 impl Provider for ClaudeCodeProvider {
-    fn name(&self) -> &str {
-        "claude-code"
-    }
-
     fn chat(&self, messages: &[ChatMessage], model: &str) -> Result<String, ProviderError> {
         let system = messages
             .iter()
@@ -646,7 +642,7 @@ impl Provider for ClaudeCodeProvider {
             cmd.args(["--system-prompt", system]);
         }
 
-        let mut child = cmd
+        let child = cmd
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -829,7 +825,6 @@ pub fn build_provider(name: &str, api_key: &str) -> Option<Box<dyn Provider>> {
         "anthropic" => Some(Box::new(AnthropicClient::new(api_key))),
         "claude-code" => Some(Box::new(ClaudeCodeProvider)),
         "minimax-coding" => Some(Box::new(AnthropicClient::with_base_url(
-            "minimax-coding",
             api_key,
             "https://api.minimax.io/anthropic",
         ))),
