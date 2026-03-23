@@ -882,3 +882,123 @@ fn run_event_loop(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn word_wrap_short_string() {
+        let result = word_wrap("hello world", 80);
+        assert_eq!(result, vec!["hello world"]);
+    }
+
+    #[test]
+    fn word_wrap_wraps_at_width() {
+        let result = word_wrap("hello world foo bar", 11);
+        assert_eq!(result, vec!["hello world", "foo bar"]);
+    }
+
+    #[test]
+    fn word_wrap_empty_string() {
+        let result = word_wrap("", 80);
+        assert_eq!(result, vec![""]);
+    }
+
+    #[test]
+    fn word_wrap_zero_width() {
+        let result = word_wrap("hello", 0);
+        assert_eq!(result, vec!["hello"]);
+    }
+
+    #[test]
+    fn word_wrap_single_long_word() {
+        let result = word_wrap("superlongword", 5);
+        assert_eq!(result, vec!["superlongword"]);
+    }
+
+    #[test]
+    fn word_wrap_exact_width() {
+        let result = word_wrap("ab cd", 5);
+        assert_eq!(result, vec!["ab cd"]);
+    }
+
+    #[test]
+    fn render_text_line_plain() {
+        let spans = render_text_line("hello", Color::White);
+        assert_eq!(spans.len(), 2);
+    }
+
+    #[test]
+    fn render_text_line_h1() {
+        let spans = render_text_line("# Title", Color::White);
+        assert_eq!(spans.len(), 2);
+    }
+
+    #[test]
+    fn render_text_line_bullet() {
+        let spans = render_text_line("- item", Color::White);
+        assert_eq!(spans.len(), 3);
+    }
+
+    #[test]
+    fn render_text_line_horizontal_rule() {
+        let spans = render_text_line("---", Color::White);
+        assert_eq!(spans.len(), 1);
+    }
+
+    #[test]
+    fn tui_state_agent_index_found() {
+        let config = crate::orchestrator::DebateConfig {
+            team_name: "test".to_string(),
+            agents: vec![
+                AgentConfig {
+                    name: "alice".to_string(),
+                    provider: "test".to_string(),
+                    model: "test".to_string(),
+                    system_prompt: String::new(),
+                    role: "debater".to_string(),
+                },
+                AgentConfig {
+                    name: "bob".to_string(),
+                    provider: "test".to_string(),
+                    model: "test".to_string(),
+                    system_prompt: String::new(),
+                    role: "debater".to_string(),
+                },
+            ],
+            topics: vec!["topic".to_string()],
+            visibility: "group".to_string(),
+            termination: "fixed".to_string(),
+            max_rounds: 5,
+            convergence_threshold: 2,
+        };
+        let state = TuiState::new(&config);
+        assert_eq!(state.agent_index("bob"), Some(1));
+        assert_eq!(state.agent_index("alice"), Some(0));
+        assert_eq!(state.agent_index("unknown"), None);
+    }
+
+    #[test]
+    fn tui_state_elapsed_str_seconds() {
+        let config = crate::orchestrator::DebateConfig {
+            team_name: "test".to_string(),
+            agents: vec![],
+            topics: vec![],
+            visibility: "group".to_string(),
+            termination: "fixed".to_string(),
+            max_rounds: 1,
+            convergence_threshold: 2,
+        };
+        let state = TuiState::new(&config);
+        let elapsed = state.elapsed_str();
+        assert!(elapsed.contains("s"));
+    }
+
+    #[test]
+    fn agent_color_wraps() {
+        let c0 = agent_color(0);
+        let c6 = agent_color(6);
+        assert_eq!(c0, c6);
+    }
+}
