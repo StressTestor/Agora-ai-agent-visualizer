@@ -700,6 +700,15 @@ fn run_debate_thread(
 }
 
 fn run_tui_loop(config: DebateConfig, rx: mpsc::Receiver<DebateEvent>) -> Result<(), String> {
+    // Install panic hook BEFORE entering raw mode
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // Best-effort terminal restore
+        let _ = disable_raw_mode();
+        let _ = stdout().execute(LeaveAlternateScreen);
+        original_hook(info);
+    }));
+
     stdout()
         .execute(EnterAlternateScreen)
         .map_err(|e| format!("failed to enter alternate screen: {e}"))?;
@@ -713,6 +722,9 @@ fn run_tui_loop(config: DebateConfig, rx: mpsc::Receiver<DebateEvent>) -> Result
     state.status = "running".to_string();
 
     let result = run_event_loop(&mut terminal, &mut state, rx);
+
+    // Discard our panic hook (default is reinstalled automatically)
+    let _ = std::panic::take_hook();
 
     disable_raw_mode().ok();
     stdout().execute(LeaveAlternateScreen).ok();
