@@ -613,12 +613,7 @@ fn run_debate_thread(
                 match provider.chat_streaming(&context, &agent_config.model, &mut on_chunk) {
                     Ok(text) => break 'call text,
                     Err(e) => {
-                        let delay = match &e {
-                            provider::ProviderError::RateLimit(s) => {
-                                s.parse::<u64>().unwrap_or(60).max(60)
-                            }
-                            _ => 2u64.pow(attempt),
-                        };
+                        let delay = crate::orchestrator::retry_delay(&e, attempt);
                         last_err = Some(e);
                         if attempt < 3 {
                             std::thread::sleep(Duration::from_secs(delay));
@@ -641,22 +636,8 @@ fn run_debate_thread(
             round: state.current_round,
         });
 
-        let agent_count = state.config.agents.len();
-        let next_idx = (agent_idx + 1) % agent_count;
-        let to_name = if state.config.visibility == "directed" {
-            state.config.agents[next_idx].name.clone()
-        } else {
-            "all".to_string()
-        };
-
-        let msg = DebateMessage {
-            from: agent_config.name.clone(),
-            to: to_name,
-            content: response,
-            timestamp: crate::orchestrator::now_ms(),
-            team: state.config.team_name.clone(),
-            role: agent_config.role.clone(),
-        };
+        let (next_idx, new_round) = crate::orchestrator::next_turn(agent_idx, state.config.agents.len());
+        let msg = crate::orchestrator::make_message(&agent_config, &response, &config, agent_idx, state.current_round);
 
         if persist {
             crate::orchestrator::persist_message(&msg);
@@ -665,30 +646,27 @@ fn run_debate_thread(
         state.messages.push(msg);
         state.current_agent_idx = next_idx;
 
-        if next_idx == 0 {
+        if new_round {
             state.current_round += 1;
             let _ = tx.send(DebateEvent::RoundAdvance {
                 round: state.current_round,
             });
 
-            if state.config.termination == "topic" && state.current_round % 3 == 0 {
+            if let Some(topic) = crate::orchestrator::advance_topic(&state.config, state.current_round, state.current_topic_idx) {
                 state.current_topic_idx += 1;
-                if state.current_topic_idx < state.config.topics.len() {
-                    let topic = state.config.topics[state.current_topic_idx].clone();
-                    let topic_msg = DebateMessage {
-                        from: "system".to_string(),
-                        to: "all".to_string(),
-                        content: format!("moving to next topic: {topic}"),
-                        timestamp: crate::orchestrator::now_ms(),
-                        team: state.config.team_name.clone(),
-                        role: "system".to_string(),
-                    };
-                    if persist {
-                        crate::orchestrator::persist_message(&topic_msg);
-                    }
-                    state.messages.push(topic_msg);
-                    let _ = tx.send(DebateEvent::TopicChange { topic });
+                let topic_msg = DebateMessage {
+                    from: "system".to_string(),
+                    to: "all".to_string(),
+                    content: format!("moving to next topic: {topic}"),
+                    timestamp: crate::orchestrator::now_ms(),
+                    team: state.config.team_name.clone(),
+                    role: "system".to_string(),
+                };
+                if persist {
+                    crate::orchestrator::persist_message(&topic_msg);
                 }
+                state.messages.push(topic_msg);
+                let _ = tx.send(DebateEvent::TopicChange { topic });
             }
         }
 

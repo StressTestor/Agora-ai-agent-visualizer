@@ -1,4 +1,5 @@
 use crate::config::AppConfig;
+use crate::model_profiles;
 use crate::provider::{self, ChatMessage, Provider};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -108,7 +109,7 @@ impl DebateState {
     }
 }
 
-fn now_ms() -> u64 {
+pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -198,7 +199,7 @@ fn hidden_debate_instructions(
 
 /// Merge consecutive messages with the same role (required by Anthropic) and
 /// ensure at least one user message exists before any assistant message.
-fn normalize_context(context: Vec<ChatMessage>) -> Vec<ChatMessage> {
+pub fn normalize_context(context: Vec<ChatMessage>) -> Vec<ChatMessage> {
     // Separate system messages; we'll re-prepend them at the end
     let (system_msgs, conv_msgs): (Vec<ChatMessage>, Vec<ChatMessage>) =
         context.into_iter().partition(|m| m.role == "system");
@@ -237,17 +238,40 @@ fn normalize_context(context: Vec<ChatMessage>) -> Vec<ChatMessage> {
     result
 }
 
-fn build_context(state: &DebateState, agent: &AgentConfig) -> Vec<ChatMessage> {
+pub fn build_context(state: &DebateState, agent: &AgentConfig) -> Vec<ChatMessage> {
     // Count how many times this agent has spoken so far (0-indexed turn count)
     let my_turn_count = state.messages.iter().filter(|m| m.from == agent.name).count();
 
     let hidden = hidden_debate_instructions(agent, &state.config.agents, my_turn_count);
 
-    // Embed topic + hidden protocol in system prompt
-    let system_content = if let Some(topic) = state.config.topics.get(state.current_topic_idx) {
-        format!("{}\n\ncurrent debate topic: {topic}\n\n{hidden}", agent.system_prompt)
+    // Inject model identity profile for arena roles
+    let model_identity = if agent.role == "judge" {
+        // Judge gets all debater profiles for comparative context
+        let debater_profiles: Vec<String> = state.config.agents.iter()
+            .filter(|a| a.role == "debater" && a.name != agent.name)
+            .filter_map(|a| {
+                model_profiles::get_model_profile(&a.provider, &a.model)
+                    .map(|p| format!("[{} — {}]: {}", a.name, a.model, p))
+            })
+            .collect();
+        if debater_profiles.is_empty() {
+            String::new()
+        } else {
+            format!("\n\nmodels you are judging:\n{}", debater_profiles.join("\n\n"))
+        }
+    } else if agent.role == "debater" {
+        model_profiles::get_model_profile(&agent.provider, &agent.model)
+            .map(|p| format!("\n\nyour model identity:\n{p}"))
+            .unwrap_or_default()
     } else {
-        format!("{}\n\n{hidden}", agent.system_prompt)
+        String::new()
+    };
+
+    // Embed topic + model identity + hidden protocol in system prompt
+    let system_content = if let Some(topic) = state.config.topics.get(state.current_topic_idx) {
+        format!("{}{model_identity}\n\ncurrent debate topic: {topic}\n\n{hidden}", agent.system_prompt)
+    } else {
+        format!("{}{model_identity}\n\n{hidden}", agent.system_prompt)
     };
 
     let mut context = vec![ChatMessage {
@@ -289,7 +313,7 @@ fn build_context(state: &DebateState, agent: &AgentConfig) -> Vec<ChatMessage> {
 // Termination checks
 // ---------------------------------------------------------------------------
 
-fn should_stop(state: &DebateState) -> bool {
+pub fn should_stop(state: &DebateState) -> bool {
     match state.config.termination.as_str() {
         "fixed" => state.current_round >= state.config.max_rounds,
         "topic" => state.current_topic_idx >= state.config.topics.len(),
@@ -351,7 +375,7 @@ fn safe_filename(name: &str) -> String {
 
 /// Write the team config.json and create the inboxes directory so watch mode
 /// picks it up immediately.
-fn init_team_on_disk(config: &DebateConfig) {
+pub fn init_team_on_disk(config: &DebateConfig) {
     let team_dir = home_dir()
         .join(".claude")
         .join("teams")
@@ -372,7 +396,7 @@ fn init_team_on_disk(config: &DebateConfig) {
 }
 
 /// Append a message to ~/.claude/teams/{team}/inboxes/{to}.json
-fn persist_message(msg: &DebateMessage) {
+pub fn persist_message(msg: &DebateMessage) {
     let inbox_dir = team_inbox_dir(&msg.team);
     let _ = std::fs::create_dir_all(&inbox_dir);
 
@@ -436,7 +460,7 @@ pub fn start_debate(
         }
 
         'debate: loop {
-            let (agent_idx, agent_config, team_name, visibility);
+            let (agent_idx, agent_config, team_name);
             {
                 let state = debate_state.lock().unwrap();
 
@@ -467,7 +491,6 @@ pub fn start_debate(
                 agent_idx = state.current_agent_idx;
                 agent_config = state.config.agents[agent_idx].clone();
                 team_name = state.config.team_name.clone();
-                visibility = state.config.visibility.clone();
             }
 
             // Build context
@@ -512,12 +535,7 @@ pub fn start_debate(
                     match provider.chat_streaming(&context, &agent_config.model, &mut on_chunk) {
                         Ok(text) => break 'call text,
                         Err(e) => {
-                            let delay = match &e {
-                                provider::ProviderError::RateLimit(s) => {
-                                    s.parse::<u64>().unwrap_or(0).max(60)
-                                }
-                                _ => 2u64.pow(attempt),
-                            };
+                            let delay = retry_delay(&e, attempt);
                             last_err = Some(e);
                             if attempt < 3 {
                                 std::thread::sleep(std::time::Duration::from_secs(delay));
@@ -535,29 +553,14 @@ pub fn start_debate(
                 break 'debate;
             };
 
-            // Determine "to" field
-            let agent_count;
-            {
+            // Build message via shared helper
+            let (next_idx, new_round) = {
                 let state = debate_state.lock().unwrap();
-                agent_count = state.config.agents.len();
-            }
-            let next_idx = (agent_idx + 1) % agent_count;
-            let to_name = {
-                let state = debate_state.lock().unwrap();
-                if visibility == "directed" {
-                    state.config.agents[next_idx].name.clone()
-                } else {
-                    "all".to_string()
-                }
+                next_turn(agent_idx, state.config.agents.len())
             };
-
-            let msg = DebateMessage {
-                from: agent_config.name.clone(),
-                to: to_name,
-                content: response,
-                timestamp: now_ms(),
-                team: team_name.clone(),
-                role: agent_config.role.clone(),
+            let msg = {
+                let state = debate_state.lock().unwrap();
+                make_message(&agent_config, &response, &state.config, agent_idx, state.current_round)
             };
 
             // Pre-insert hash so the file-watcher path won't emit a duplicate
@@ -592,25 +595,21 @@ pub fn start_debate(
                 state.messages.push(msg);
                 state.current_agent_idx = next_idx;
 
-                if next_idx == 0 {
+                if new_round {
                     state.current_round += 1;
 
-                    // Topic-based: advance topic every 3 rounds
-                    if state.config.termination == "topic" && state.current_round % 3 == 0 {
+                    if let Some(topic) = advance_topic(&state.config, state.current_round, state.current_topic_idx) {
                         state.current_topic_idx += 1;
-                        if state.current_topic_idx < state.config.topics.len() {
-                            let topic = state.config.topics[state.current_topic_idx].clone();
-                            let topic_msg = DebateMessage {
-                                from: "system".to_string(),
-                                to: "all".to_string(),
-                                content: format!("moving to next topic: {topic}"),
-                                timestamp: now_ms(),
-                                team: team_name.clone(),
-                                role: "system".to_string(),
-                            };
-                            persist_message(&topic_msg);
-                            state.messages.push(topic_msg);
-                        }
+                        let topic_msg = DebateMessage {
+                            from: "system".to_string(),
+                            to: "all".to_string(),
+                            content: format!("moving to next topic: {topic}"),
+                            timestamp: now_ms(),
+                            team: team_name.clone(),
+                            role: "system".to_string(),
+                        };
+                        persist_message(&topic_msg);
+                        state.messages.push(topic_msg);
                     }
                 }
 
@@ -621,6 +620,60 @@ pub fn start_debate(
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// Shared pure functions (used by orchestrator, cli, and tui)
+// ---------------------------------------------------------------------------
+
+/// Compute the next agent index and whether a new round starts.
+pub fn next_turn(current_idx: usize, agent_count: usize) -> (usize, bool) {
+    let next = (current_idx + 1) % agent_count;
+    (next, next == 0)
+}
+
+/// Construct a DebateMessage from the current turn's output.
+pub fn make_message(
+    agent: &AgentConfig,
+    response: &str,
+    config: &DebateConfig,
+    current_idx: usize,
+    _current_round: u32,
+) -> DebateMessage {
+    let agent_count = config.agents.len();
+    let next_idx = (current_idx + 1) % agent_count;
+    let to_name = if config.visibility == "directed" {
+        config.agents[next_idx].name.clone()
+    } else {
+        "all".to_string()
+    };
+    DebateMessage {
+        from: agent.name.clone(),
+        to: to_name,
+        content: response.to_string(),
+        timestamp: now_ms(),
+        team: config.team_name.clone(),
+        role: agent.role.clone(),
+    }
+}
+
+/// Check if the topic should advance. Returns the new topic string if so.
+pub fn advance_topic(config: &DebateConfig, current_round: u32, current_topic_idx: usize) -> Option<String> {
+    if config.termination != "topic" || current_round % 3 != 0 {
+        return None;
+    }
+    let next_idx = current_topic_idx + 1;
+    config.topics.get(next_idx).cloned()
+}
+
+/// Compute retry delay in seconds based on error type and attempt number.
+pub fn retry_delay(error: &crate::provider::ProviderError, attempt: u32) -> u64 {
+    match error {
+        crate::provider::ProviderError::RateLimit(s) => {
+            s.parse::<u64>().unwrap_or(60).max(60)
+        }
+        _ => 2u64.pow(attempt),
+    }
 }
 
 fn emit_status(handle: &AppHandle, state: &DebateState) {
@@ -641,4 +694,160 @@ fn emit_status(handle: &AppHandle, state: &DebateState) {
             error_msg,
         },
     );
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config(num_agents: usize) -> DebateConfig {
+        let agents: Vec<AgentConfig> = (0..num_agents)
+            .map(|i| AgentConfig {
+                name: format!("agent-{i}"),
+                provider: "test".to_string(),
+                model: "test-model".to_string(),
+                system_prompt: String::new(),
+                role: "debater".to_string(),
+            })
+            .collect();
+        DebateConfig {
+            team_name: "test-debate".to_string(),
+            agents,
+            topics: vec!["topic 1".to_string(), "topic 2".to_string()],
+            visibility: "group".to_string(),
+            termination: "fixed".to_string(),
+            max_rounds: 5,
+            convergence_threshold: 2,
+        }
+    }
+
+    #[test]
+    fn next_turn_wraps_around() {
+        let (next_idx, new_round) = next_turn(1, 3);
+        assert_eq!(next_idx, 2);
+        assert!(!new_round);
+    }
+
+    #[test]
+    fn next_turn_starts_new_round() {
+        let (next_idx, new_round) = next_turn(2, 3);
+        assert_eq!(next_idx, 0);
+        assert!(new_round);
+    }
+
+    #[test]
+    fn make_message_group_visibility() {
+        let config = test_config(3);
+        let agent = &config.agents[0];
+        let msg = make_message(agent, "hello world", &config, 0, 1);
+        assert_eq!(msg.from, "agent-0");
+        assert_eq!(msg.to, "all");
+        assert_eq!(msg.content, "hello world");
+    }
+
+    #[test]
+    fn make_message_directed_visibility() {
+        let mut config = test_config(3);
+        config.visibility = "directed".to_string();
+        let agent = &config.agents[0];
+        let msg = make_message(agent, "hello", &config, 0, 1);
+        assert_eq!(msg.to, "agent-1");
+    }
+
+    #[test]
+    fn advance_topic_not_time() {
+        let mut config = test_config(2);
+        config.termination = "topic".to_string();
+        assert_eq!(advance_topic(&config, 2, 0), None);
+    }
+
+    #[test]
+    fn advance_topic_advances() {
+        let mut config = test_config(2);
+        config.termination = "topic".to_string();
+        assert_eq!(advance_topic(&config, 3, 0), Some("topic 2".to_string()));
+    }
+
+    #[test]
+    fn advance_topic_past_end() {
+        let mut config = test_config(2);
+        config.termination = "topic".to_string();
+        assert_eq!(advance_topic(&config, 6, 1), None);
+    }
+
+    #[test]
+    fn retry_delay_rate_limit() {
+        use crate::provider::ProviderError;
+        let delay = retry_delay(&ProviderError::RateLimit("90".to_string()), 0);
+        assert_eq!(delay, 90);
+    }
+
+    #[test]
+    fn retry_delay_rate_limit_minimum_60() {
+        use crate::provider::ProviderError;
+        let delay = retry_delay(&ProviderError::RateLimit("5".to_string()), 0);
+        assert_eq!(delay, 60);
+    }
+
+    #[test]
+    fn retry_delay_other_error_exponential() {
+        use crate::provider::ProviderError;
+        let delay = retry_delay(&ProviderError::Network("timeout".to_string()), 2);
+        assert_eq!(delay, 4);
+    }
+
+    #[test]
+    fn should_stop_fixed_at_max() {
+        let config = test_config(2);
+        let mut state = DebateState::new(config);
+        state.current_round = 5;
+        assert!(should_stop(&state));
+    }
+
+    #[test]
+    fn should_stop_fixed_below_max() {
+        let config = test_config(2);
+        let mut state = DebateState::new(config);
+        state.current_round = 3;
+        assert!(!should_stop(&state));
+    }
+
+    #[test]
+    fn normalize_context_merges_consecutive_roles() {
+        let context = vec![
+            ChatMessage { role: "system".to_string(), content: "sys".to_string() },
+            ChatMessage { role: "user".to_string(), content: "a".to_string() },
+            ChatMessage { role: "user".to_string(), content: "b".to_string() },
+        ];
+        let result = normalize_context(context);
+        assert_eq!(result.len(), 2);
+        assert!(result[1].content.contains("a"));
+        assert!(result[1].content.contains("b"));
+    }
+
+    #[test]
+    fn normalize_context_ensures_user_first() {
+        let context = vec![
+            ChatMessage { role: "assistant".to_string(), content: "hello".to_string() },
+        ];
+        let result = normalize_context(context);
+        assert_eq!(result[0].role, "user");
+    }
+
+    #[test]
+    fn build_context_debater_gets_profile() {
+        let config = test_config(2);
+        let mut state = DebateState::new(config);
+        state.current_round = 1;
+        let mut agent = state.config.agents[0].clone();
+        agent.model = "claude-opus-4-6".to_string();
+        agent.provider = "anthropic".to_string();
+        let context = build_context(&state, &agent);
+        let system = &context[0].content;
+        assert!(system.contains("model identity") || system.contains("Claude Opus"));
+    }
 }

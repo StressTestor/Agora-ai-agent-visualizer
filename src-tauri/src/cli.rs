@@ -1,5 +1,5 @@
 use crate::config::AppConfig;
-use crate::orchestrator::{AgentConfig, DebateConfig, DebateMessage, DebateState, DebateStatus};
+use crate::orchestrator::{AgentConfig, DebateConfig, DebateState, DebateStatus};
 use crate::presets;
 use crate::provider::{self, Provider};
 use std::io::Write;
@@ -465,12 +465,7 @@ fn cmd_debate(args: &[String]) -> Result<(), String> {
                     Ok(text) => break 'call text,
                     Err(e) => {
                         if attempt < 3 {
-                            let delay = match &e {
-                                provider::ProviderError::RateLimit(s) => {
-                                    s.parse::<u64>().unwrap_or(60).max(60)
-                                }
-                                _ => 2u64.pow(attempt),
-                            };
+                            let delay = crate::orchestrator::retry_delay(&e, attempt);
                             eprintln!(
                                 "\n  {YELLOW}retry {}/{} ({e}), waiting {delay}s...{RESET}",
                                 attempt + 1,
@@ -490,23 +485,9 @@ fn cmd_debate(args: &[String]) -> Result<(), String> {
 
         println!("\n");
 
-        // Determine recipient
-        let agent_count = state.config.agents.len();
-        let next_idx = (agent_idx + 1) % agent_count;
-        let to_name = if state.config.visibility == "directed" {
-            state.config.agents[next_idx].name.clone()
-        } else {
-            "all".to_string()
-        };
-
-        let msg = DebateMessage {
-            from: agent_config.name.clone(),
-            to: to_name,
-            content: response,
-            timestamp: crate::orchestrator::now_ms(),
-            team: state.config.team_name.clone(),
-            role: agent_config.role.clone(),
-        };
+        // Build message via shared helper
+        let (next_idx, new_round) = crate::orchestrator::next_turn(agent_idx, state.config.agents.len());
+        let msg = crate::orchestrator::make_message(&agent_config, &response, &debate_config, agent_idx, state.current_round);
 
         // Persist
         if parsed.persist {
@@ -517,16 +498,13 @@ fn cmd_debate(args: &[String]) -> Result<(), String> {
         state.messages.push(msg);
         state.current_agent_idx = next_idx;
 
-        if next_idx == 0 {
+        if new_round {
             state.current_round += 1;
             println!("  {DIM}── round {} ──{RESET}\n", state.current_round);
 
-            if state.config.termination == "topic" && state.current_round % 3 == 0 {
+            if let Some(topic) = crate::orchestrator::advance_topic(&state.config, state.current_round, state.current_topic_idx) {
                 state.current_topic_idx += 1;
-                if state.current_topic_idx < state.config.topics.len() {
-                    let topic = &state.config.topics[state.current_topic_idx];
-                    println!("  {MAGENTA}▸ next topic:{RESET} {topic}\n");
-                }
+                println!("  {MAGENTA}▸ next topic:{RESET} {topic}\n");
             }
         }
 
