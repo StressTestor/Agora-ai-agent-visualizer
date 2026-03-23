@@ -363,7 +363,7 @@ fn team_inbox_dir(team: &str) -> PathBuf {
     home_dir()
         .join(".claude")
         .join("teams")
-        .join(team)
+        .join(safe_filename(team))
         .join("inboxes")
 }
 
@@ -379,7 +379,7 @@ pub fn init_team_on_disk(config: &DebateConfig) {
     let team_dir = home_dir()
         .join(".claude")
         .join("teams")
-        .join(&config.team_name);
+        .join(safe_filename(&config.team_name));
     let _ = std::fs::create_dir_all(team_dir.join("inboxes"));
 
     let team_cfg = serde_json::json!({

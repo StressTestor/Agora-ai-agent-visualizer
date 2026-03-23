@@ -83,10 +83,10 @@ struct TuiState {
     current_agent: String,
     current_agent_idx: Option<usize>,
     is_streaming: bool,       // true once first chunk arrives
-    scroll_offset: u16,
+    scroll_offset: usize,
     auto_scroll: bool,
     done: bool,
-    total_content_height: u16,
+    total_content_height: usize,
     start_time: Instant,
     agent_start_time: Instant, // when current agent started
 }
@@ -248,9 +248,10 @@ fn render_sidebar(frame: &mut Frame, state: &TuiState, area: Rect) {
             Span::styled(&agent.provider, Style::default().fg(Color::DarkGray)),
         ]));
 
-        // Model (truncated to sidebar width)
-        let model_display = if agent.model.len() > sidebar_width {
-            format!("{}…", &agent.model[..sidebar_width.saturating_sub(1)])
+        // Model (truncated to sidebar width, UTF-8 safe)
+        let model_display = if agent.model.chars().count() > sidebar_width {
+            let truncated: String = agent.model.chars().take(sidebar_width.saturating_sub(1)).collect();
+            format!("{truncated}…")
         } else {
             agent.model.clone()
         };
@@ -311,8 +312,9 @@ fn render_header(frame: &mut Frame, state: &TuiState, area: Rect) {
 
     let topic_line = if let Some(topic) = state.topics.first() {
         let max_len = area.width.saturating_sub(6) as usize;
-        let display = if topic.len() > max_len {
-            format!("{}…", &topic[..max_len.saturating_sub(1)])
+        let display = if topic.chars().count() > max_len {
+            let truncated: String = topic.chars().take(max_len.saturating_sub(1)).collect();
+            format!("{truncated}…")
         } else {
             topic.clone()
         };
@@ -440,16 +442,16 @@ fn render_chat(frame: &mut Frame, state: &mut TuiState, area: Rect) {
         }
     }
 
-    let total_lines = lines.len() as u16;
+    let total_lines = lines.len();
     state.total_content_height = total_lines;
-    let visible_height = inner.height;
+    let visible_height = inner.height as usize;
 
     if state.auto_scroll && total_lines > visible_height {
         state.scroll_offset = total_lines.saturating_sub(visible_height);
     }
 
     let para = Paragraph::new(lines)
-        .scroll((state.scroll_offset, 0))
+        .scroll((state.scroll_offset as u16, 0))
         .wrap(Wrap { trim: false });
 
     frame.render_widget(para, inner);
@@ -851,7 +853,7 @@ fn run_event_loop(
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
                         state.scroll_offset = state.scroll_offset.saturating_add(3);
-                        let visible = terminal.size().map(|s| s.height).unwrap_or(40);
+                        let visible = terminal.size().map(|s| s.height as usize).unwrap_or(40);
                         if state.scroll_offset + visible >= state.total_content_height {
                             state.auto_scroll = true;
                         }
@@ -862,7 +864,7 @@ fn run_event_loop(
                     }
                     KeyCode::PageDown => {
                         state.scroll_offset = state.scroll_offset.saturating_add(20);
-                        let visible = terminal.size().map(|s| s.height).unwrap_or(40);
+                        let visible = terminal.size().map(|s| s.height as usize).unwrap_or(40);
                         if state.scroll_offset + visible >= state.total_content_height {
                             state.auto_scroll = true;
                         }

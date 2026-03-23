@@ -456,12 +456,10 @@ fn cmd_debate(args: DebateArgs) -> Result<(), String> {
         state.messages.len()
     );
     if persist {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         println!(
             "  {DIM}saved to: ~/.claude/teams/{}/{RESET}",
             args.name
         );
-        let _ = home; // suppress warning
     }
     println!();
 
