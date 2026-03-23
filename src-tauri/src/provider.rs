@@ -752,50 +752,61 @@ impl Provider for ClaudeCodeProvider {
         let stdout = child.stdout.take()
             .ok_or_else(|| ProviderError::Other("failed to capture stdout".to_string()))?;
 
-        // Spawn a kill timer — 120s max.
-        let kill_pid = pid;
+        // Spawn reader thread — sends parsed lines through channel
+        let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_secs(120));
-            unsafe { libc::kill(kill_pid as libc::pid_t, libc::SIGKILL); }
+            let reader = std::io::BufReader::new(stdout);
+            for line in reader.lines().flatten() {
+                if line_tx.send(line).is_err() {
+                    break; // receiver dropped
+                }
+            }
         });
 
-        let reader = std::io::BufReader::new(stdout);
         let mut accumulated = String::new();
         let mut final_result: Option<String> = None;
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
 
-        for line in reader.lines() {
-            let line = match line {
-                Ok(l) => l,
-                Err(_) => break,
-            };
-
-            if line.is_empty() {
-                continue;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL); }
+                let _ = child.wait();
+                return Err(ProviderError::Other("claude CLI timed out after 120s".to_string()));
             }
 
-            let json: serde_json::Value = match serde_json::from_str(&line) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            // Check for text_delta in stream events
-            if json["type"] == "stream_event" {
-                let event = &json["event"];
-                if event["type"] == "content_block_delta" {
-                    let delta = &event["delta"];
-                    if delta["type"] == "text_delta" {
-                        if let Some(text) = delta["text"].as_str() {
-                            accumulated.push_str(text);
-                            on_chunk(text);
+            match line_rx.recv_timeout(remaining) {
+                Ok(line) => {
+                    if line.is_empty() { continue; }
+                    let json: serde_json::Value = match serde_json::from_str(&line) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    if json["type"] == "stream_event" {
+                        let event = &json["event"];
+                        if event["type"] == "content_block_delta" {
+                            let delta = &event["delta"];
+                            if delta["type"] == "text_delta" {
+                                if let Some(text) = delta["text"].as_str() {
+                                    accumulated.push_str(text);
+                                    on_chunk(text);
+                                }
+                            }
+                        }
+                    }
+                    if json["type"] == "result" {
+                        if let Some(r) = json["result"].as_str() {
+                            final_result = Some(r.to_string());
                         }
                     }
                 }
-            }
-
-            // Check for final result
-            if json["type"] == "result" {
-                if let Some(r) = json["result"].as_str() {
-                    final_result = Some(r.to_string());
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL); }
+                    let _ = child.wait();
+                    return Err(ProviderError::Other("claude CLI timed out after 120s".to_string()));
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    break; // reader thread finished
                 }
             }
         }
