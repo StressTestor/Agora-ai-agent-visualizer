@@ -18,24 +18,51 @@
     width: 100vw; height: 100vh;
     object-fit: fill;
   }
+  #skip {
+    position: fixed; right: 16px; bottom: 16px;
+    padding: 8px 12px; border: 1px solid #777; border-radius: 6px;
+    color: #fff; background: #111d; font: 14px system-ui;
+    cursor: pointer; -webkit-app-region: no-drag;
+  }
+  #skip:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
 </style>
 </head>
 <body>
 <video id="v" autoplay muted playsinline>
   <source src="agora-intro.mp4" type="video/mp4">
 </video>
+<button id="skip" type="button">Skip intro</button>
 <script>
 const video = document.getElementById('v');
+let finishing = false;
+let finished = false;
+let fallback;
 
 async function done() {
-  const { invoke } = window.__TAURI__.core;
-  await invoke('show_main_and_close_splash');
+  if (finishing || finished) return;
+  finishing = true;
+  try {
+    const invoke = window.__TAURI__?.core?.invoke;
+    if (!invoke) throw new Error('Desktop commands are unavailable.');
+    await invoke('show_main_and_close_splash');
+    finished = true;
+    clearTimeout(fallback);
+  } catch (error) {
+    console.warn('Could not finish the intro; the native timeout will close it.', error);
+  } finally {
+    finishing = false;
+  }
 }
 
 video.addEventListener('ended', done);
-video.addEventListener('error', done);
+// Source loading errors do not bubble, so capture them from the source element.
+video.addEventListener('error', done, true);
 document.addEventListener('click', done);
-setTimeout(done, 8000);
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') done();
+});
+fallback = setTimeout(done, 8000);
+video.play().catch(done);
 </script>
 </body>
 </html>

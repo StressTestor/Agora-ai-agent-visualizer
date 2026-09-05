@@ -32,7 +32,8 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 8px 14px 8px 78px;
+    padding: 34px 14px 8px;
+    flex-wrap: wrap;
     background: var(--bg);
     border-bottom: 1px solid var(--border);
     min-height: 40px;
@@ -44,7 +45,7 @@
   #app-name {
     position: fixed;
     top: 0; left: 0; right: 0;
-    height: 40px;
+    height: 28px;
     display: flex; align-items: center; justify-content: center;
     font-weight: 600; font-size: 13px; letter-spacing: 0.03em;
     pointer-events: none;
@@ -127,6 +128,7 @@
   }
   .msg-body.collapsed { max-height: 200px; overflow: hidden; }
   .msg-collapse-btn {
+    align-self: flex-start;
     display: block; margin-left: 24px; margin-top: 4px;
     background: none; border: none; padding: 0;
     font-size: 9px; color: var(--muted); cursor: pointer;
@@ -177,7 +179,7 @@
   .modal-overlay.visible { display: flex; }
   .modal-panel {
     background: var(--surface); border: 1px solid var(--border);
-    border-radius: 8px; padding: 20px 28px; min-width: 400px; max-width: 560px;
+    border-radius: 8px; padding: 20px 28px; width: min(560px, calc(100vw - 24px)); min-width: 0;
     max-height: 80vh; overflow-y: auto;
   }
   .modal-panel h3 {
@@ -191,12 +193,13 @@
   }
   .field-row { display: flex; gap: 6px; align-items: center; }
   .field-input {
-    flex: 1; background: var(--bg); border: 1px solid var(--border);
+    flex: 1; min-width: 0; background: var(--bg); border: 1px solid var(--border);
     color: var(--text); font-family: inherit; font-size: 11px;
     padding: 4px 8px; border-radius: 4px; outline: none;
   }
   .field-input:focus { border-color: var(--cyan); }
   .field-input::placeholder { color: var(--muted); }
+  .field-group > .field-input { width: 100%; }
   .btn-sm {
     background: transparent; border: 1px solid var(--border); color: var(--muted);
     font-family: inherit; font-size: 9px; padding: 3px 10px; border-radius: 4px;
@@ -209,6 +212,9 @@
     cursor: pointer; font-weight: 600;
   }
   .btn-primary:hover { opacity: 0.9; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  #wizard-error { color: #f87171; margin-top: 10px; font-size: 11px; }
+  [aria-invalid="true"] { border-color: #f87171; }
   .status-dot {
     width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
   }
@@ -223,6 +229,7 @@
   /* Debate control bar */
   #debate-controls {
     display: none; align-items: center; gap: 6px;
+    order: 1; flex-basis: 100%; flex-wrap: wrap; min-width: 0;
     font-size: 10px; color: var(--muted);
   }
   #debate-controls.active { display: flex; }
@@ -336,12 +343,12 @@
 <div id="app">
 
   <div id="header">
-    <select id="team-select">
+    <select id="team-select" aria-label="team">
       <option value="">all teams</option>
     </select>
     <button id="btn-delete-team" class="btn-sm" title="delete team" style="display:none;color:#f87171;border-color:#f8717144">×</button>
     <button id="btn-new-debate" class="btn-sm">+ debate</button>
-    <input id="search-input" type="text" placeholder="search... (⌘K)">
+    <input id="search-input" type="text" aria-label="search messages" placeholder="search... (⌘K)">
     <div id="debate-controls">
       <span id="debate-status-dot"></span>
       <span id="debate-status-text">stopped</span>
@@ -392,12 +399,13 @@
 
   <!-- Wizard modal -->
   <div id="wizard-overlay" class="modal-overlay">
-    <div class="modal-panel" style="min-width:480px">
+    <div class="modal-panel">
       <div id="wizard-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
         <h3 id="wizard-title" style="margin:0">new debate</h3>
         <span id="wizard-step-indicator" style="font-size:9px;color:var(--muted)">step 1 of 4</span>
       </div>
       <div id="wizard-body"></div>
+      <div id="wizard-error" role="alert" hidden></div>
       <div class="modal-footer">
         <button class="btn-sm" id="wizard-back" style="display:none">back</button>
         <div class="spacer"></div>
@@ -465,10 +473,33 @@ function initials(name) { return name.slice(0, 2).toUpperCase(); }
 
 // ── State ─────────────────────────────────────────────────────
 let messages        = [];
+const messageIds = new Set();
+const messageId = msg => JSON.stringify([msg.team, msg.from, msg.to, msg.content, msg.timestamp]);
+
+function retainMessage(msg) {
+  if (isIdleNoise(msg)) return false;
+  const id = messageId(msg);
+  if (messageIds.has(id)) return false;
+  messageIds.add(id);
+  messages.push(msg);
+  return true;
+}
+
+function removeMessages(predicate) {
+  messages = messages.filter(msg => !predicate(msg));
+  messageIds.clear();
+  for (const msg of messages) messageIds.add(messageId(msg));
+}
 let currentFilter   = null;
 let autoScroll      = true;
 const knownAgents   = new Set();
-const streamingBubbles = new Map(); // agentName -> { node, bodyEl, cursorEl }
+const streamingBubbles = new Map(); // [team, agent] -> retained stream nodes
+const streamKey = (agent, team) => JSON.stringify([team, agent]);
+let renderedMessages = [];
+const searchableText = new WeakMap();
+const messageNodes = new WeakMap();
+const pendingStreams = new Set();
+let streamFrame = null;
 
 // ── DOM refs ──────────────────────────────────────────────────
 const $chat       = document.getElementById('chat');
@@ -494,7 +525,7 @@ $scrollBtn.addEventListener('click', () => {
 });
 
 function maybeScroll() {
-  $chat.scrollTop = $chat.scrollHeight;
+  if (autoScroll) $chat.scrollTop = $chat.scrollHeight;
 }
 
 // ── Chip bar ──────────────────────────────────────────────────
@@ -532,6 +563,12 @@ function buildMessageNode(msg) {
 
   ensureChip(msg.from);
   ensureChip(msg.to);
+  const cached = messageNodes.get(msg);
+  if (cached) {
+    cached.querySelector('.msg-badge').hidden = Boolean(currentFilter);
+    trackRenderedMessage(cached);
+    return cached;
+  }
 
   const authority = isAuthority(msg.role);
   const row = document.createElement('div');
@@ -572,12 +609,11 @@ function buildMessageNode(msg) {
 
   meta.append(avatar, route, arrow, target);
 
-  if (!currentFilter) {
-    const badge = document.createElement('span');
-    badge.className  = 'msg-badge';
-    badge.textContent = msg.team;
-    meta.appendChild(badge);
-  }
+  const teamBadge = document.createElement('span');
+  teamBadge.className = 'msg-badge';
+  teamBadge.textContent = msg.team;
+  teamBadge.hidden = Boolean(currentFilter);
+  meta.appendChild(teamBadge);
 
   const ts = document.createElement('span');
   ts.className  = 'msg-ts';
@@ -598,7 +634,17 @@ function buildMessageNode(msg) {
   });
 
   row.append(meta, body, collapseBtn);
+  const text = body.textContent.toLowerCase();
+  searchableText.set(row, text);
+  messageNodes.set(msg, row);
+  trackRenderedMessage(row);
   return row;
+}
+
+function trackRenderedMessage(row) {
+  const query = $search.value.toLowerCase();
+  row.style.display = query && !searchableText.get(row).includes(query) ? 'none' : '';
+  renderedMessages.push(row);
 }
 
 // Detect idle/system noise that slipped through the backend filter
@@ -607,7 +653,6 @@ function isIdleNoise(msg) {
   if (!c) return false;
   // Raw JSON with idle_notification type
   const noiseTypes = ['idle_notification', 'heartbeat', 'ping', 'status_update', 'shutdown_request'];
-  for (const t of noiseTypes) { if (c.includes(`"${t}"`)) return true; }
   // Try parsing — might be a stringified JSON object
   if (c.startsWith('{')) {
     try { const o = JSON.parse(c); if (noiseTypes.includes(o.type)) return true; } catch {}
@@ -625,10 +670,11 @@ function appendMessage(msg) {
 // ── Thinking bubble ───────────────────────────────────────────
 let $thinkingNode = null;
 let thinkingAgent = null;
+let thinkingTeam = null;
 
 function showThinking(agentName, teamName) {
-  clearThinking();
   if (currentFilter && teamName !== currentFilter) return;
+  clearThinking();
 
   const color = agentColor(agentName);
   const row = document.createElement('div');
@@ -656,16 +702,20 @@ function showThinking(agentName, teamName) {
 
   $thinkingNode = row;
   thinkingAgent = agentName;
+  thinkingTeam = teamName;
 }
 
-function clearThinking() {
-  if ($thinkingNode) { $thinkingNode.remove(); $thinkingNode = null; thinkingAgent = null; }
+function clearThinking(team, agent) {
+  if (team && thinkingTeam !== team) return;
+  if (agent && thinkingAgent !== agent) return;
+  if ($thinkingNode) { $thinkingNode.remove(); $thinkingNode = null; thinkingAgent = null; thinkingTeam = null; }
 }
 
 function getOrCreateStreamingBubble(agentName, teamName) {
-  if (streamingBubbles.has(agentName)) return streamingBubbles.get(agentName);
+  const key = streamKey(agentName, teamName);
+  if (streamingBubbles.has(key)) return streamingBubbles.get(key);
 
-  clearThinking();
+  clearThinking(teamName, agentName);
 
   const color = agentColor(agentName);
   const row = document.createElement('div');
@@ -704,20 +754,49 @@ function getOrCreateStreamingBubble(agentName, teamName) {
 
   const cursor = document.createElement('span');
   cursor.className = 'streaming-cursor';
+  const textNode = document.createTextNode('');
+  body.appendChild(textNode);
   body.appendChild(cursor);
 
   row.append(meta, body);
-  $chat.appendChild(row);
-  ensureChip(agentName);
+  if (!currentFilter || currentFilter === teamName) {
+    $chat.appendChild(row);
+    ensureChip(agentName);
+  }
 
-  const entry = { node: row, bodyEl: body, cursorEl: cursor };
-  streamingBubbles.set(agentName, entry);
+  const entry = { node: row, bodyEl: body, cursorEl: cursor, textNode, pending: '', team: teamName, agent: agentName };
+  streamingBubbles.set(key, entry);
   return entry;
 }
 
-function clearStreamingBubble(agentName) {
-  const bubble = streamingBubbles.get(agentName);
-  if (bubble) { bubble.node.remove(); streamingBubbles.delete(agentName); }
+function clearStreamingBubble(agentName, teamName) {
+  const key = streamKey(agentName, teamName);
+  const bubble = streamingBubbles.get(key);
+  if (bubble) {
+    pendingStreams.delete(bubble);
+    bubble.node.remove();
+    streamingBubbles.delete(key);
+  }
+}
+
+function filterStream(bubble) {
+  const query = $search.value.toLowerCase();
+  bubble.node.style.display = !query || bubble.textNode.data.toLowerCase().includes(query) ? '' : 'none';
+}
+
+function flushStreams() {
+  streamFrame = null;
+  let visibleChanged = false;
+  for (const bubble of pendingStreams) {
+    bubble.textNode.appendData(bubble.pending);
+    bubble.pending = '';
+    if (bubble.node.isConnected) {
+      filterStream(bubble);
+      visibleChanged = true;
+    }
+  }
+  pendingStreams.clear();
+  if (visibleChanged) maybeScroll();
 }
 
 function buildSystemNode(text) {
@@ -744,11 +823,12 @@ function appendSystem(text) {
 
 // ── Filter ────────────────────────────────────────────────────
 function applyFilter() {
+  clearThinking();
   // Clear search when switching teams
   $search.value = '';
-  // Wipe chat (keep $empty node)
-  while ($chat.firstChild) $chat.removeChild($chat.firstChild);
-  $chat.appendChild($empty);
+  // Build the next transcript off-screen, then replace it in one insertion.
+  const fragment = document.createDocumentFragment();
+  renderedMessages = [];
   knownAgents.clear();
   $chips.innerHTML = '';
 
@@ -760,16 +840,31 @@ function applyFilter() {
     $empty.style.display = 'flex';
   } else {
     $empty.style.display = 'none';
-    visible.forEach(m => $chat.appendChild(buildMessageNode(m)));
+    visible.forEach(m => fragment.appendChild(buildMessageNode(m)));
   }
 
+  for (const bubble of streamingBubbles.values()) {
+    if (!currentFilter || bubble.team === currentFilter) {
+      fragment.appendChild(bubble.node);
+      filterStream(bubble);
+      ensureChip(bubble.agent);
+      $empty.style.display = 'none';
+    }
+  }
+  $chat.replaceChildren($empty, fragment);
+  $btnDeleteTeam.style.display = currentFilter ? '' : 'none';
+  renderDebateControls();
   updateFooter();
+  autoScroll = true;
+  $scrollBtn.classList.remove('visible');
   $chat.scrollTop = $chat.scrollHeight;
 }
 
 function updateFooter() {
-  const n = currentFilter ? messages.filter(m => m.team === currentFilter).length : messages.length;
-  $msgCount.textContent   = `${n} message${n !== 1 ? 's' : ''}`;
+  const query = $search.value.toLowerCase();
+  const total = renderedMessages.length;
+  const visible = query ? renderedMessages.filter(node => node.style.display !== 'none').length : total;
+  $msgCount.textContent = query ? `${visible} of ${total} messages` : `${total} message${total !== 1 ? 's' : ''}`;
   $filterStat.textContent = currentFilter ? `· ${currentFilter}` : '';
 }
 
@@ -778,6 +873,7 @@ function populateTeams(teams) {
   const existing = new Set([...$teamSelect.options].map(o => o.value));
   for (const t of teams) {
     if (existing.has(t)) continue;
+    existing.add(t);
     const opt = document.createElement('option');
     opt.value       = t;
     opt.textContent = t;
@@ -794,19 +890,25 @@ $teamSelect.addEventListener('change', () => {
 });
 
 $btnDeleteTeam.addEventListener('click', async () => {
-  if (!currentFilter) return;
-  if (!window.confirm(`delete team "${currentFilter}"?\n\nthis removes the team folder from ~/.claude/teams/ and cannot be undone.`)) return;
+  const team = currentFilter;
+  if (!team) return;
+  if (!window.confirm(`delete team "${team}"?\n\nthis removes the team folder from ~/.claude/teams/ and cannot be undone.`)) return;
   const { invoke } = window.__TAURI__.core;
   try {
-    await invoke('delete_team', { team: currentFilter });
-    // Remove from selector
-    const opt = [...$teamSelect.options].find(o => o.value === currentFilter);
+    await invoke('delete_team', { team });
+    const opt = [...$teamSelect.options].find(o => o.value === team);
     if (opt) opt.remove();
-    // Remove from messages and reset
-    messages = messages.filter(m => m.team !== currentFilter);
-    currentFilter = null;
-    $teamSelect.value = '';
-    $btnDeleteTeam.style.display = 'none';
+    removeMessages(msg => msg.team === team);
+    clearThinking(team);
+    for (const bubble of streamingBubbles.values()) {
+      if (bubble.team === team) clearStreamingBubble(bubble.agent, team);
+    }
+    debateStatuses.delete(team);
+    if (activeDebateTeam === team) activeDebateTeam = null;
+    if (currentFilter === team) {
+      currentFilter = null;
+      $teamSelect.value = '';
+    }
     applyFilter();
     showToast('team deleted');
   } catch (err) {
@@ -816,7 +918,7 @@ $btnDeleteTeam.addEventListener('click', async () => {
 
 // ── Clear ─────────────────────────────────────────────────────
 document.getElementById('btn-clear').addEventListener('click', () => {
-  messages = [];
+  removeMessages(() => true);
   $search.value = '';
   applyFilter();
 });
@@ -824,17 +926,12 @@ document.getElementById('btn-clear').addEventListener('click', () => {
 // ── Search ────────────────────────────────────────────────────
 function applySearch() {
   const q = $search.value.toLowerCase();
-  const msgs = $chat.querySelectorAll('.msg');
-  let visible = 0;
-  msgs.forEach(el => {
-    const match = !q || el.querySelector('.msg-body').textContent.toLowerCase().includes(q);
-    el.style.display = match ? '' : 'none';
-    if (match) visible++;
+  renderedMessages.forEach(el => {
+    const display = !q || searchableText.get(el).includes(q) ? '' : 'none';
+    if (el.style.display !== display) el.style.display = display;
   });
-  const total = msgs.length;
-  $msgCount.textContent = q
-    ? `${visible} of ${total} messages`
-    : `${total} message${total !== 1 ? 's' : ''}`;
+  for (const bubble of streamingBubbles.values()) filterStream(bubble);
+  updateFooter();
 }
 
 $search.addEventListener('input', applySearch);
@@ -858,7 +955,7 @@ document.addEventListener('keydown', (e) => {
       return;
     }
     if (wizardEl && wizardEl.classList.contains('visible')) {
-      wizardEl.classList.remove('visible');
+      closeWizard();
       return;
     }
     if (document.activeElement === $search) {
@@ -874,16 +971,7 @@ async function init() {
   const { invoke } = window.__TAURI__.core;
   const { listen  } = window.__TAURI__.event;
 
-  // Load teams into selector
-  const teams = await invoke('get_teams');
-  populateTeams(teams);
-
-  // Load existing messages (filter idle noise)
-  const existing = await invoke('get_messages');
-  for (const m of existing) { if (!isIdleNoise(m)) messages.push(m); }
-  applyFilter();
-
-
+  // Subscribe before taking snapshots so concurrent updates can be merged.
   // Thinking indicator
   await listen('debate-thinking', ({ payload }) => {
     showThinking(payload.agent, payload.team);
@@ -891,18 +979,12 @@ async function init() {
 
   // New message stream
   await listen('new-message', ({ payload: msg }) => {
-    if (isIdleNoise(msg)) return;
-    clearThinking();
-    messages.push(msg);
+    clearThinking(msg.team, msg.from);
+    if (!retainMessage(msg)) return;
     if (!currentFilter || msg.team === currentFilter) {
       $empty.style.display = 'none';
       const node = buildMessageNode(msg);
       $chat.appendChild(node);
-      // Respect active search
-      const q = $search.value.toLowerCase();
-      if (q && !node.querySelector('.msg-body').textContent.toLowerCase().includes(q)) {
-        node.style.display = 'none';
-      }
       maybeScroll();
     }
     updateFooter();
@@ -910,6 +992,7 @@ async function init() {
 
   // Task updates
   await listen('task-update', ({ payload: u }) => {
+    if (currentFilter && u.team !== currentFilter) return;
     appendSystem(`task "${u.subject}" → ${u.status} [${u.team}]`);
     updateFooter();
   });
@@ -922,12 +1005,34 @@ async function init() {
 
   // Debate controls
   await initDebateControls();
+
+  const [teams, existing] = await Promise.all([invoke('get_teams'), invoke('get_messages')]);
+  populateTeams(teams);
+  for (const msg of existing) retainMessage(msg);
+  messages.sort((a, b) => a.timestamp - b.timestamp);
+  populateTeams(messages.map(msg => msg.team));
+  applyFilter();
+
+  // A paused worker may never emit another status until the user resumes it.
+  await Promise.all([...$teamSelect.options].filter(option => option.value).map(async option => {
+    const team = option.value;
+    const previous = debateStatuses.get(team);
+    try {
+      const status = await invoke('get_debate_status', { team });
+      if (debateStatuses.get(team) !== previous || !option.isConnected) return;
+      if (status.team === team && status.status) applyDebateStatus(status);
+    } catch (err) {
+      // Watch-only Claude teams have no in-process debate state.
+      if (!String(err).includes(`no debate '${team}'`)) showToast(`could not load debate status: ${err}`);
+    }
+  }));
 }
 
 function waitForTauri() {
   if (window.__TAURI__) {
     init().catch(err => {
       console.error('init error:', err);
+      showToast(`could not load Agora: ${err}`);
     });
   } else {
     setTimeout(waitForTauri, 50);
@@ -955,8 +1060,12 @@ const NO_KEY_PROVIDERS = new Set(['claude-code']);
 const providerLabel = p => PROVIDER_LABELS[p] || p;
 
 document.getElementById('btn-settings').addEventListener('click', async () => {
-  await loadSettings();
-  $settingsOverlay.classList.add('visible');
+  try {
+    await loadSettings();
+    $settingsOverlay.classList.add('visible');
+  } catch (err) {
+    showToast(`could not load settings: ${err}`);
+  }
 });
 
 document.getElementById('settings-cancel').addEventListener('click', () => {
@@ -1019,20 +1128,29 @@ async function loadSettings() {
 
     const testBtn = document.createElement('button');
     testBtn.className = 'btn-sm';
-    testBtn.textContent = 'test';
+    testBtn.textContent = 'save & test';
     testBtn.addEventListener('click', async () => {
+      testBtn.disabled = true;
       testBtn.textContent = '...';
       try {
         await saveCurrentSettings();
+        const generation = modelCacheGeneration;
         const models = await invoke('list_models', { providerName: name });
+        if (generation !== modelCacheGeneration) {
+          testBtn.textContent = 'save & test';
+          return;
+        }
         modelListCache[name] = models; // refresh cache on explicit test
         dot.className = 'status-dot ok';
         testBtn.textContent = `✓ ${models.length}`;
-        setTimeout(() => { testBtn.textContent = 'test'; }, 2000);
+        setTimeout(() => { testBtn.textContent = 'save & test'; }, 2000);
       } catch (err) {
         dot.className = 'status-dot error';
         testBtn.textContent = 'fail';
-        setTimeout(() => { testBtn.textContent = 'test'; }, 2000);
+        showToast(`provider test failed: ${err}`);
+        setTimeout(() => { testBtn.textContent = 'save & test'; }, 2000);
+      } finally {
+        testBtn.disabled = false;
       }
     });
 
@@ -1061,12 +1179,23 @@ async function saveCurrentSettings() {
   if (enhanceModelInput) config.enhance_model = enhanceModelInput.value.trim();
 
   await invoke('save_config', { config });
+  modelCacheGeneration++;
+  for (const name of Object.keys(modelListCache)) delete modelListCache[name];
+  modelRequests.clear();
 }
 
 document.getElementById('settings-save').addEventListener('click', async () => {
-  await saveCurrentSettings();
-  showToast('settings saved');
-  $settingsOverlay.classList.remove('visible');
+  const button = document.getElementById('settings-save');
+  button.disabled = true;
+  try {
+    await saveCurrentSettings();
+    showToast('settings saved');
+    $settingsOverlay.classList.remove('visible');
+  } catch (err) {
+    showToast(`could not save settings: ${err}`);
+  } finally {
+    button.disabled = false;
+  }
 });
 
 // ── Setup wizard ─────────────────────────────────────────────
@@ -1085,7 +1214,25 @@ let wizardState = {
 
 let cachedPresets = [];
 let cachedRoles = [];
+let wizardRenderVersion = 0;
 const modelListCache = {}; // provider -> models[], persists for session
+const modelRequests = new Map();
+let modelCacheGeneration = 0;
+
+async function modelsForProvider(providerName) {
+  if (modelListCache[providerName]) return modelListCache[providerName];
+  if (modelRequests.has(providerName)) return modelRequests.get(providerName);
+  const generation = modelCacheGeneration;
+  const request = window.__TAURI__.core.invoke('list_models', { providerName });
+  modelRequests.set(providerName, request);
+  try {
+    const models = await request;
+    if (generation === modelCacheGeneration) modelListCache[providerName] = models;
+    return models;
+  } finally {
+    if (modelRequests.get(providerName) === request) modelRequests.delete(providerName);
+  }
+}
 
 document.getElementById('btn-new-debate').addEventListener('click', () => {
   wizardState = {
@@ -1098,11 +1245,17 @@ document.getElementById('btn-new-debate').addEventListener('click', () => {
 });
 
 document.getElementById('wizard-cancel').addEventListener('click', () => {
-  $wizardOverlay.classList.remove('visible');
+  closeWizard();
 });
 
+function closeWizard() {
+  wizardRenderVersion++;
+  $wizardOverlay.classList.remove('visible');
+  document.getElementById('btn-new-debate').focus();
+}
+
 $wizardOverlay.addEventListener('click', (e) => {
-  if (e.target === $wizardOverlay) $wizardOverlay.classList.remove('visible');
+  if (e.target === $wizardOverlay) closeWizard();
 });
 
 $wizardBack.addEventListener('click', () => {
@@ -1115,25 +1268,85 @@ $wizardBack.addEventListener('click', () => {
 
 $wizardNext.addEventListener('click', async () => {
   saveCurrentWizardStep();
+  if (!validateWizardStep()) return;
   if (wizardState.step < 4) {
     wizardState.step++;
     renderWizardStep();
   } else {
-    await launchDebate();
+    const draft = wizardState;
+    $wizardNext.disabled = true;
+    try { await launchDebate(); }
+    finally { if (wizardState === draft) $wizardNext.disabled = false; }
   }
 });
 
-function renderWizardStep() {
+async function renderWizardStep() {
+  const version = ++wizardRenderVersion;
+  const error = document.getElementById('wizard-error');
+  error.hidden = true;
+  error.textContent = '';
   $wizardStep.textContent = `step ${wizardState.step} of 4`;
   $wizardBack.style.display = wizardState.step > 1 ? '' : 'none';
   $wizardNext.textContent = wizardState.step === 4 ? 'start debate' : 'next';
 
-  switch (wizardState.step) {
-    case 1: renderStep1(); break;
-    case 2: renderStep2(); break;
-    case 3: renderStep3(); break;
-    case 4: renderStep4(); break;
+  $wizardNext.disabled = true;
+  $wizardBack.disabled = true;
+  try {
+    switch (wizardState.step) {
+      case 1: await renderStep1(version); break;
+      case 2: await renderStep2(); break;
+      case 3: renderStep3(); break;
+      case 4: renderStep4(); break;
+    }
+    if (version === wizardRenderVersion) {
+      $wizardNext.disabled = false;
+      $wizardBody.querySelector('input, select, textarea')?.focus();
+    }
+  } catch (err) {
+    if (version !== wizardRenderVersion) return;
+    $wizardBody.textContent = 'Could not load this step. Close the wizard and try again.';
+    showToast(`could not load debate setup: ${err}`);
+  } finally {
+    if (version === wizardRenderVersion) $wizardBack.disabled = false;
   }
+}
+
+function validateWizardStep() {
+  const error = document.getElementById('wizard-error');
+  error.hidden = true;
+  $wizardBody.querySelectorAll('[aria-invalid]').forEach(field => field.removeAttribute('aria-invalid'));
+  const invalid = (message, selector) => {
+    error.textContent = message;
+    error.hidden = false;
+    const field = $wizardBody.querySelector(selector);
+    if (field) { field.setAttribute('aria-invalid', 'true'); field.focus(); }
+    return false;
+  };
+  if (wizardState.step === 1 && !wizardState.teamName) {
+    return invalid('Enter a debate name before continuing.', '#wizard-team-name');
+  }
+  if (wizardState.step === 2) {
+    const names = new Set();
+    for (const [index, agent] of wizardState.agents.entries()) {
+      const selector = field => `[data-idx="${index}"][data-field="${field}"]`;
+      if (!agent.name) return invalid('Give every agent a name.', selector('name'));
+      if (names.has(agent.name)) return invalid('Use a different name for each agent.', selector('name'));
+      names.add(agent.name);
+    }
+    for (const [index, agent] of wizardState.agents.entries()) {
+      if (!agent.provider) return invalid(`Choose a provider for ${agent.name}.`, `[data-idx="${index}"][data-field="provider"]`);
+      if (!agent.model) return invalid(`Enter or select a model for ${agent.name}.`, `[data-idx="${index}"][data-field="model"]`);
+    }
+  }
+  if (wizardState.step === 3) {
+    if (wizardState.termination === 'topic' && !wizardState.topics.trim()) {
+      return invalid('Add at least one topic for topic-based debates.', '#wizard-topics');
+    }
+    if (wizardState.termination === 'fixed' && (!Number.isInteger(wizardState.maxRounds) || wizardState.maxRounds < 1 || wizardState.maxRounds > 100)) {
+      return invalid('Choose a whole number of rounds from 1 to 100.', '#wizard-max-rounds');
+    }
+  }
+  return true;
 }
 
 function saveCurrentWizardStep() {
@@ -1145,13 +1358,16 @@ function saveCurrentWizardStep() {
 }
 
 // Step 1: preset & team name
-async function renderStep1() {
+async function renderStep1(version) {
   const { invoke } = window.__TAURI__.core;
   if (cachedPresets.length === 0) {
-    cachedPresets = await invoke('list_debate_presets');
-    cachedRoles = await invoke('list_role_presets');
+    const [presets, roles] = await Promise.all([invoke('list_debate_presets'), invoke('list_role_presets')]);
+    if (version !== wizardRenderVersion) return;
+    cachedPresets = presets;
+    cachedRoles = roles;
   }
-  const config = await invoke('get_config');
+  const [config, teamConfigs] = await Promise.all([invoke('get_config'), invoke('list_team_configs')]);
+  if (version !== wizardRenderVersion) return;
 
   $wizardTitle.textContent = 'new debate';
   $wizardBody.textContent = '';
@@ -1161,6 +1377,7 @@ async function renderStep1() {
   const nameLabel = document.createElement('label');
   nameLabel.className = 'field-label';
   nameLabel.textContent = 'debate name';
+  nameLabel.htmlFor = 'wizard-team-name';
   const nameInput = document.createElement('input');
   nameInput.className = 'field-input';
   nameInput.id = 'wizard-team-name';
@@ -1218,8 +1435,11 @@ async function renderStep1() {
       wizardState.visibility = preset.visibility;
       wizardState.termination = preset.termination;
       wizardState.maxRounds = preset.default_rounds;
+    } else {
+      wizardState.preset = null;
     }
   });
+  if (wizardState.preset) presetSelect.value = String(cachedPresets.indexOf(wizardState.preset));
 
   const presetWrap = document.createElement('div');
   presetWrap.style.cssText = 'display:flex;flex-direction:column;gap:0';
@@ -1246,7 +1466,6 @@ async function renderStep1() {
   statusGroup.append(statusLabel, statusRow);
 
   // Import from existing team
-  const teamConfigs = await invoke('list_team_configs');
   if (teamConfigs.length > 0) {
     const importGroup = document.createElement('div');
     importGroup.className = 'field-group';
@@ -1322,7 +1541,8 @@ function attachSelectSearch(selectEl, placeholder) {
     const cur = selectEl.value;
     selectEl.innerHTML = '';
 
-    const filtered = allOpts.filter(o => !q || o.text.toLowerCase().includes(q));
+    // Filtering narrows choices without changing an already selected value.
+    const filtered = allOpts.filter(o => o.value === cur || o.value === '' || !q || o.text.toLowerCase().includes(q));
 
     // Rebuild preserving optgroups (skip empty groups when filtering)
     const groups = {};
@@ -1343,6 +1563,7 @@ function attachSelectSearch(selectEl, placeholder) {
       });
       if (g) selectEl.appendChild(container);
     });
+    selectEl.value = cur;
   });
 
   selectEl.parentNode.insertBefore(search, selectEl);
@@ -1415,10 +1636,12 @@ function renderAgentRow(container, agent, idx) {
   nameInput.value = agent.name;
   nameInput.dataset.idx = idx;
   nameInput.dataset.field = 'name';
+  nameInput.setAttribute('aria-label', `name for agent ${idx + 1}`);
 
   const removeBtn = document.createElement('button');
   removeBtn.className = 'btn-sm';
   removeBtn.textContent = '×';
+  removeBtn.setAttribute('aria-label', `remove agent ${idx + 1}`);
   removeBtn.style.cssText = 'padding:2px 6px;font-size:12px';
   removeBtn.addEventListener('click', () => {
     if (wizardState.agents.length <= 2) { showToast('minimum 2 agents'); return; }
@@ -1438,6 +1661,7 @@ function renderAgentRow(container, agent, idx) {
   providerSelect.style.width = '120px';
   providerSelect.dataset.idx = idx;
   providerSelect.dataset.field = 'provider';
+  providerSelect.setAttribute('aria-label', `provider for agent ${idx + 1}`);
   const defaultOpt = document.createElement('option');
   defaultOpt.value = '';
   defaultOpt.textContent = 'provider...';
@@ -1456,6 +1680,7 @@ function renderAgentRow(container, agent, idx) {
   modelInput.value = agent.model;
   modelInput.dataset.idx = idx;
   modelInput.dataset.field = 'model';
+  modelInput.setAttribute('aria-label', `model for agent ${idx + 1}`);
 
   function isFreeModel(id) {
     return id.endsWith(':free') || id.includes(':free-');
@@ -1507,6 +1732,13 @@ function renderAgentRow(container, agent, idx) {
 
     addGroup('free', free);
     addGroup('paid', paid);
+    if (currentValue && !models.some(model => model.id === currentValue)) {
+      const custom = document.createElement('option');
+      custom.value = currentValue;
+      custom.textContent = `${currentValue} (custom)`;
+      custom.selected = true;
+      sel.appendChild(custom);
+    }
 
     // if models had no free/paid split, render flat
     if (!free.length && !paid.length) {
@@ -1531,6 +1763,7 @@ function renderAgentRow(container, agent, idx) {
         inp.placeholder = 'model ID';
         inp.dataset.idx = idx;
         inp.dataset.field = 'model';
+        inp.setAttribute('aria-label', `model for agent ${idx + 1}`);
         sel.replaceWith(inp);
         inp.focus();
       }
@@ -1538,17 +1771,16 @@ function renderAgentRow(container, agent, idx) {
     return sel;
   }
 
-  async function fetchAndReplaceModel(pName, currentEl, currentValue) {
+  async function fetchAndReplaceModel(pName, currentEl) {
     if (!pName) return;
     currentEl.placeholder = 'loading...';
+    const generation = modelCacheGeneration;
     try {
-      const { invoke } = window.__TAURI__.core;
-      if (!modelListCache[pName]) {
-        modelListCache[pName] = await invoke('list_models', { providerName: pName });
-      }
-      const models = modelListCache[pName];
+      const models = await modelsForProvider(pName);
+      if (!currentEl.isConnected || providerSelect.value !== pName || generation !== modelCacheGeneration) return;
       if (models.length > 0) {
-        const sel = makeModelSelect(models, currentValue, pName);
+        const sel = makeModelSelect(models, currentEl.value.trim(), pName);
+        sel.setAttribute('aria-label', `model for agent ${idx + 1}`);
         currentEl.replaceWith(sel);
       } else {
         currentEl.placeholder = 'model ID (no key configured)';
@@ -1560,12 +1792,16 @@ function renderAgentRow(container, agent, idx) {
 
   providerSelect.addEventListener('change', () => {
     const current = pmRow.querySelector('[data-field="model"]');
-    fetchAndReplaceModel(providerSelect.value, current, current.value || agent.model);
+    const input = modelInput.cloneNode();
+    input.value = '';
+    input.placeholder = 'model ID';
+    current.replaceWith(input);
+    fetchAndReplaceModel(providerSelect.value, input);
   });
 
   if (agent.provider) {
     // pre-populate on render if provider already known
-    fetchAndReplaceModel(agent.provider, modelInput, agent.model);
+    fetchAndReplaceModel(agent.provider, modelInput);
   }
 
   const providerWrap = document.createElement('div');
@@ -1582,6 +1818,7 @@ function renderAgentRow(container, agent, idx) {
   roleSelect.className = 'field-input';
   roleSelect.dataset.idx = idx;
   roleSelect.dataset.field = 'role';
+  roleSelect.setAttribute('aria-label', `role for agent ${idx + 1}`);
   const customRoleOpt = document.createElement('option');
   customRoleOpt.value = 'custom';
   customRoleOpt.textContent = 'custom role';
@@ -1631,6 +1868,7 @@ function renderAgentRow(container, agent, idx) {
   promptArea.placeholder = 'system prompt...';
   promptArea.dataset.idx = idx;
   promptArea.dataset.field = 'system_prompt';
+  promptArea.setAttribute('aria-label', `system prompt for agent ${idx + 1}`);
 
   group.append(headerRow, pmRow, roleRow, promptArea);
   container.appendChild(group);
@@ -1643,7 +1881,7 @@ function saveStep2() {
     const idx = parseInt(el.dataset.idx);
     const field = el.dataset.field;
     if (wizardState.agents[idx] && field) {
-      wizardState.agents[idx][field] = el.value;
+      wizardState.agents[idx][field] = field === 'system_prompt' ? el.value : el.value.trim();
     }
   });
 }
@@ -1662,6 +1900,7 @@ function renderStep3() {
   topicLabel.className = 'field-label';
   topicLabel.style.margin = '0';
   topicLabel.textContent = 'topics (one per line)';
+  topicLabel.htmlFor = 'wizard-topics';
 
   const enhanceBtn = document.createElement('button');
   enhanceBtn.className = 'btn-enhance';
@@ -1669,16 +1908,24 @@ function renderStep3() {
   enhanceBtn.addEventListener('click', async () => {
     const text = topicArea.value.trim();
     if (!text) return;
+    const draft = wizardState;
+    enhanceBtn.disabled = true;
     enhanceBtn.classList.add('loading');
     try {
       const { invoke } = window.__TAURI__.core;
       const refined = await invoke('enhance_topic', { text });
+      if (wizardState !== draft || !topicArea.isConnected) return;
+      if (topicArea.value.trim() !== text) {
+        showToast('Topic changed while refining; your edits were kept.');
+        return;
+      }
       topicArea.value = refined;
       wizardState.topics = refined;
     } catch (err) {
       showToast(`enhance failed: ${err}`);
     } finally {
       enhanceBtn.classList.remove('loading');
+      enhanceBtn.disabled = false;
     }
   });
 
@@ -1697,6 +1944,7 @@ function renderStep3() {
   const visLabel = document.createElement('label');
   visLabel.className = 'field-label';
   visLabel.textContent = 'visibility';
+  visLabel.htmlFor = 'wizard-visibility';
   const visSelect = document.createElement('select');
   visSelect.className = 'field-input';
   visSelect.id = 'wizard-visibility';
@@ -1714,6 +1962,7 @@ function renderStep3() {
   const termLabel = document.createElement('label');
   termLabel.className = 'field-label';
   termLabel.textContent = 'termination mode';
+  termLabel.htmlFor = 'wizard-termination';
   const termSelect = document.createElement('select');
   termSelect.className = 'field-input';
   termSelect.id = 'wizard-termination';
@@ -1735,7 +1984,8 @@ function renderStep3() {
   roundGroup.className = 'field-group';
   const roundLabel = document.createElement('label');
   roundLabel.className = 'field-label';
-  roundLabel.textContent = 'max rounds';
+  roundLabel.textContent = 'rounds';
+  roundLabel.htmlFor = 'wizard-max-rounds';
   const roundInput = document.createElement('input');
   roundInput.className = 'field-input';
   roundInput.id = 'wizard-max-rounds';
@@ -1746,7 +1996,21 @@ function renderStep3() {
   roundInput.style.width = '80px';
   roundGroup.append(roundLabel, roundInput);
 
-  $wizardBody.append(topicGroup, visGroup, termGroup, roundGroup);
+  const termHelp = document.createElement('p');
+  termHelp.id = 'wizard-termination-help';
+  termHelp.style.cssText = 'color:var(--muted);font-size:10px;margin-top:6px';
+  const updateTermination = () => {
+    roundGroup.hidden = termSelect.value !== 'fixed';
+    termHelp.textContent = {
+      fixed: 'Each agent responds once per round. The debate stops after the selected number of rounds.',
+      topic: 'Each topic gets three complete rounds, then the debate stops after the last topic.',
+      manual: 'The debate continues until you press stop.',
+      convergence: 'The debate runs until agreement is detected. You can stop it at any time.',
+    }[termSelect.value];
+  };
+  termSelect.addEventListener('change', updateTermination);
+  updateTermination();
+  $wizardBody.append(topicGroup, visGroup, termGroup, roundGroup, termHelp);
 }
 
 function saveStep3() {
@@ -1757,7 +2021,7 @@ function saveStep3() {
   const term = document.getElementById('wizard-termination');
   if (term) wizardState.termination = term.value;
   const rounds = document.getElementById('wizard-max-rounds');
-  if (rounds) wizardState.maxRounds = parseInt(rounds.value) || 10;
+  if (rounds) wizardState.maxRounds = Number(rounds.value);
 }
 
 // Step 4: review
@@ -1785,7 +2049,9 @@ function renderStep4() {
   topicLine.textContent = `topics: ${topicList.length || 'none'}`;
 
   const rulesLine = document.createElement('div');
-  rulesLine.textContent = `visibility: ${wizardState.visibility} · termination: ${wizardState.termination} · max rounds: ${wizardState.maxRounds}`;
+  rulesLine.textContent = `visibility: ${wizardState.visibility} · termination: ${wizardState.termination}`;
+  if (wizardState.termination === 'fixed') rulesLine.textContent += ` · rounds: ${wizardState.maxRounds}`;
+  if (wizardState.termination === 'topic') rulesLine.textContent += ' · 3 rounds per topic';
 
   summary.append(teamLine, agentLines, topicLine, rulesLine);
 
@@ -1812,24 +2078,27 @@ function renderStep4() {
 
 async function launchDebate() {
   const { invoke } = window.__TAURI__.core;
+  const draft = wizardState;
+  const team = draft.teamName;
+  const priorMessages = new Set(messages.filter(msg => msg.team === team));
 
-  if (!wizardState.teamName) {
+  if (!draft.teamName) {
     showToast('enter a team name');
     return;
   }
 
-  const hasErrors = wizardState.agents.some(a => !a.provider || !a.model);
+  const hasErrors = draft.agents.some(a => !a.provider || !a.model);
   if (hasErrors) {
     showToast('all agents need a provider and model');
     return;
   }
 
-  const topicList = wizardState.topics.split('\n').filter(t => t.trim());
+  const topicList = draft.topics.split('\n').filter(t => t.trim());
 
   try {
     const debateConfig = {
-      team_name: wizardState.teamName,
-      agents: wizardState.agents.map(a => ({
+      team_name: draft.teamName,
+      agents: draft.agents.map(a => ({
         name: a.name,
         provider: a.provider,
         model: a.model,
@@ -1837,26 +2106,28 @@ async function launchDebate() {
         role: a.role || '',
       })),
       topics: topicList,
-      visibility: wizardState.visibility,
-      termination: wizardState.termination,
-      max_rounds: wizardState.maxRounds,
-      convergence_threshold: wizardState.convergenceThreshold,
+      visibility: draft.visibility,
+      termination: draft.termination,
+      max_rounds: draft.termination === 'fixed' ? draft.maxRounds : 10,
+      convergence_threshold: draft.convergenceThreshold,
     };
 
     await invoke('create_debate', { config: debateConfig });
-    await invoke('start_debate_cmd', { team: wizardState.teamName });
+    if (wizardState !== draft || !$wizardOverlay.classList.contains('visible')) return;
+    await invoke('start_debate_cmd', { team });
+    if (wizardState !== draft) return;
 
     // Drop prior messages for this team from memory so the new debate starts clean.
     // Old messages are archived on disk at ~/.claude/teams/{team}/archive/.
-    messages = messages.filter(m => m.team !== wizardState.teamName);
+    removeMessages(msg => priorMessages.has(msg));
 
-    populateTeams([wizardState.teamName]);
-    $teamSelect.value = wizardState.teamName;
-    currentFilter = wizardState.teamName;
+    populateTeams([draft.teamName]);
+    $teamSelect.value = draft.teamName;
+    currentFilter = draft.teamName;
     applyFilter();
 
     $wizardOverlay.classList.remove('visible');
-    showToast(`debate "${wizardState.teamName}" started`);
+    showToast(`debate "${draft.teamName}" started`);
   } catch (err) {
     showToast(`error: ${err}`);
   }
@@ -1868,21 +2139,64 @@ const $debateStatusDot = document.getElementById('debate-status-dot');
 const $debateStatusText = document.getElementById('debate-status-text');
 const $debateRoundText = document.getElementById('debate-round-text');
 let activeDebateTeam = null;
+const debateStatuses = new Map();
+
+function renderDebateControls() {
+  const team = currentFilter || activeDebateTeam;
+  const status = debateStatuses.get(team);
+  $debateControls.classList.toggle('active', Boolean(status));
+  if (!status) return;
+  $debateStatusDot.className = status.status;
+  $debateStatusText.textContent = currentFilter ? status.status : `${team}: ${status.status}`;
+  $debateRoundText.textContent = status.round > 0 ? `· round ${status.round}` : '';
+  if (status.status === 'error' && status.error_msg) {
+    $debateRoundText.textContent += ` · ${status.error_msg}`;
+  }
+  const running = status.status === 'running' || status.status === 'paused';
+  document.getElementById('btn-pause').disabled = !running;
+  document.getElementById('btn-stop').disabled = !running;
+  document.getElementById('btn-pause').textContent = status.status === 'paused' ? '▶' : '⏸';
+}
+
+function controlledTeam() {
+  const team = currentFilter || activeDebateTeam;
+  return debateStatuses.has(team) ? team : null;
+}
+
+function applyDebateStatus(payload) {
+  activeDebateTeam = payload.team;
+  debateStatuses.set(payload.team, payload);
+  renderDebateControls();
+
+  if (payload.status === 'stopped' || payload.status === 'converged' || payload.status === 'error') {
+    clearThinking(payload.team);
+    for (const bubble of streamingBubbles.values()) {
+      if (bubble.team === payload.team) clearStreamingBubble(bubble.agent, bubble.team);
+    }
+  }
+}
 
 async function initDebateControls() {
   const { listen } = window.__TAURI__.event;
 
+  await listen('debate-message-reset', ({ payload }) => {
+    clearStreamingBubble(payload.agent, payload.team);
+    clearThinking(payload.team, payload.agent);
+  });
+
   await listen('debate-message-chunk', ({ payload }) => {
-    if (currentFilter && payload.team !== currentFilter) return;
-    $empty.style.display = 'none';
     const bubble = getOrCreateStreamingBubble(payload.agent, payload.team);
-    const textNode = document.createTextNode(payload.chunk);
-    bubble.bodyEl.insertBefore(textNode, bubble.cursorEl);
-    if (autoScroll) maybeScroll();
+    bubble.pending += payload.chunk;
+    pendingStreams.add(bubble);
+    if (streamFrame === null) streamFrame = requestAnimationFrame(flushStreams);
+    if (!currentFilter || payload.team === currentFilter) {
+      $empty.style.display = 'none';
+    }
   });
 
   await listen('debate-message-complete', ({ payload }) => {
-    clearStreamingBubble(payload.agent);
+    clearStreamingBubble(payload.agent || payload.from, payload.team);
+    clearThinking(payload.team, payload.agent || payload.from);
     const msg = {
       from: payload.from,
       to: payload.to,
@@ -1891,16 +2205,11 @@ async function initDebateControls() {
       team: payload.team,
       role: payload.role,
     };
-    if (!isIdleNoise(msg)) {
-      messages.push(msg);
+    if (retainMessage(msg)) {
       if (!currentFilter || msg.team === currentFilter) {
         $empty.style.display = 'none';
         const node = buildMessageNode(msg);
         $chat.appendChild(node);
-        const q = $search.value.toLowerCase();
-        if (q && !node.querySelector('.msg-body').textContent.toLowerCase().includes(q)) {
-          node.style.display = 'none';
-        }
         maybeScroll();
       }
       updateFooter();
@@ -1908,43 +2217,27 @@ async function initDebateControls() {
   });
 
   await listen('debate-status', ({ payload }) => {
-    activeDebateTeam = payload.team;
-    $debateControls.classList.add('active');
-    $debateStatusDot.className = payload.status;
-    $debateStatusDot.id = 'debate-status-dot';
-    $debateStatusDot.classList.add(payload.status);
-    $debateStatusText.textContent = payload.status;
-    $debateRoundText.textContent = payload.round > 0 ? `· round ${payload.round}` : '';
-
-    if (payload.status === 'error' && payload.error_msg) {
-      $debateRoundText.textContent += ` · ${payload.error_msg}`;
-    }
-
-    if (payload.status === 'stopped' || payload.status === 'converged' || payload.status === 'error') {
-      document.getElementById('btn-pause').textContent = '⏸';
-      clearThinking();
-      streamingBubbles.forEach((_, name) => clearStreamingBubble(name));
-    }
+    applyDebateStatus(payload);
   });
 }
 
 document.getElementById('btn-pause').addEventListener('click', async () => {
-  if (!activeDebateTeam) return;
+  const team = controlledTeam();
+  if (!team) return;
   const { invoke } = window.__TAURI__.core;
   try {
-    await invoke('pause_debate', { team: activeDebateTeam });
-    const btn = document.getElementById('btn-pause');
-    btn.textContent = btn.textContent === '⏸' ? '▶' : '⏸';
+    await invoke('pause_debate', { team });
   } catch (err) {
     showToast(`error: ${err}`);
   }
 });
 
 document.getElementById('btn-stop').addEventListener('click', async () => {
-  if (!activeDebateTeam) return;
+  const team = controlledTeam();
+  if (!team) return;
   const { invoke } = window.__TAURI__.core;
   try {
-    await invoke('stop_debate', { team: activeDebateTeam });
+    await invoke('stop_debate', { team });
     showToast('debate stopped');
   } catch (err) {
     showToast(`error: ${err}`);
@@ -1952,13 +2245,14 @@ document.getElementById('btn-stop').addEventListener('click', async () => {
 });
 
 document.getElementById('btn-restart').addEventListener('click', async () => {
-  if (!activeDebateTeam) return;
+  const team = controlledTeam();
+  if (!team) return;
   const { invoke } = window.__TAURI__.core;
   try {
-    messages = messages.filter(m => m.team !== activeDebateTeam);
+    const priorMessages = new Set(messages.filter(msg => msg.team === team));
+    await invoke('restart_debate', { team });
+    removeMessages(msg => priorMessages.has(msg));
     applyFilter();
-    await invoke('restart_debate', { team: activeDebateTeam });
-    document.getElementById('btn-pause').textContent = '⏸';
     showToast('debate restarted');
   } catch (err) {
     showToast(`error: ${err}`);

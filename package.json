@@ -1,0 +1,11 @@
+{
+  "name": "agora-ui-tests",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/*.test.cjs",
+    "bench:stream": "node tests/streaming.bench.cjs"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0"
+  }
+}
