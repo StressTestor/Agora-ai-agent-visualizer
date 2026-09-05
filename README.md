@@ -28,11 +28,12 @@ or grab the DMG from [releases](https://github.com/StressTestor/Agora-ai-agent-v
 
 - watches `~/.claude/teams/*/inboxes/*.json` via macOS FSEvents (+ 2s poll fallback)
 - parses 5 different inbox JSON formats (array, `{messages:[]}`, `{inbox:[]}`, single object, key-value map)
-- deduplicates messages by content hash
+- deduplicates messages by content hash; unchanged inboxes use metadata checks instead of repeated JSON parsing
 - detects new teams appearing at runtime
 - tracks task status changes from `~/.claude/tasks/`
 - color-coded agents: advocate (cyan), critic (red), synthesizer (purple), team-lead (amber), fallback palette for custom agents
 - per-message collapse/expand buttons, content search (Cmd+K), auto-scroll
+- batches streamed updates per frame and reuses message views when switching teams
 - archives previous debate messages when a new debate starts on the same team
 
 **debate mode** — run your own multi-model debates
@@ -41,10 +42,12 @@ or grab the DMG from [releases](https://github.com/StressTestor/Agora-ai-agent-v
 - **streaming text** — responses stream in character by character as the model generates them, with a blinking cursor. no waiting for the full response before seeing anything
 - **claude code CLI provider** — no API key needed, uses your existing CC subscription. runs `claude -p` as a subprocess so you never touch the OAuth token
 - mix providers per agent in the same debate (e.g. Claude Haiku via CC vs Gemini Flash via API key)
-- 4-step wizard: team name, agents, topics, settings
+- 4-step wizard with inline validation; selected providers and custom model IDs survive filtering and loading
 - **topic refinement** — ✦ button on the topics field sends your rough idea to a configured AI and rewrites it into a specific, debatable topic. uses CC by default, configurable in settings
 - import agent configs from existing claude code teams
 - termination modes: fixed rounds, topic cycling, convergence detection, manual stop
+- convergence requires agreement from every participant across the configured number of complete rounds
+- failed or incomplete provider responses do not become completed turns; write failures are reported
 - visibility modes: group (everyone sees everything) or directed (one-to-one)
 - pause/resume/stop/restart controls
 - API keys stored locally at `~/.config/agora/config.json`
@@ -71,9 +74,13 @@ agora list-presets
 
 # list models for a provider
 agora list-models groq
+agora list-models claude-code # uses existing CLI auth, no API key
+
+# model IDs can contain colons; append a built-in role if needed
+# --agent 'critic:openrouter:vendor/model:free:critic'
 ```
 
-TUI features: agent-colored chat panels, per-turn timing, markdown rendering, vi-style scroll (j/k/PgUp/PgDn), live streaming with cursor indicator. press q to quit (debate thread stops immediately).
+TUI features: agent-colored chat panels, per-turn timing, markdown rendering, vi-style scroll (j/k/PgUp/PgDn), live streaming with cursor indicator. press q to quit. An in-flight provider request may continue upstream after the terminal closes.
 
 **27 role presets across 7 categories**
 
@@ -139,6 +146,22 @@ if your root disk is full, build to an external drive:
 ```bash
 CARGO_TARGET_DIR=/Volumes/yourDrive/.cargo-tmp cargo tauri build
 ```
+
+## test
+
+```bash
+# UI regressions with synthetic events; no API calls
+npm ci
+npm test
+npm run bench:stream
+
+# Rust tests
+cd src-tauri
+cargo test --locked
+```
+
+Stop and pause update the GUI immediately. An in-flight provider call still
+needs to finish or time out before restart is available.
 
 ## stack
 
