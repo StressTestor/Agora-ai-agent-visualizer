@@ -60,7 +60,7 @@ pub struct DebateArgs {
     #[arg(short, long)]
     pub preset: Option<String>,
 
-    /// Agent as name:provider:model[:role] (repeatable)
+    /// Agent as name:provider:model[:role]; only a built-in trailing role is removed from the model ID
     #[arg(short, long, num_args = 1)]
     pub agent: Vec<String>,
 
@@ -72,17 +72,17 @@ pub struct DebateArgs {
     #[arg(short = 'T', long)]
     pub topic: Vec<String>,
 
-    /// Max rounds (default: 10)
-    #[arg(short, long, default_value_t = 10)]
-    pub rounds: u32,
+    /// Max rounds (preset default, or 10 when no preset is selected)
+    #[arg(short, long, value_parser = clap::value_parser!(u32).range(1..))]
+    pub rounds: Option<u32>,
 
-    /// Termination mode: fixed|convergence|topic|manual
-    #[arg(long, default_value = "convergence")]
-    pub termination: String,
+    /// Termination mode (preset default, or convergence)
+    #[arg(long, value_parser = ["fixed", "convergence", "topic", "manual"])]
+    pub termination: Option<String>,
 
-    /// Visibility mode: group|directed
-    #[arg(long, default_value = "group")]
-    pub visibility: String,
+    /// Visibility mode (preset default, or group)
+    #[arg(long, value_parser = ["group", "directed"])]
+    pub visibility: Option<String>,
 
     /// Don't write to ~/.claude/teams/
     #[arg(long)]
@@ -107,17 +107,37 @@ pub fn run_cli() -> Result<(), String> {
 }
 
 fn parse_agent_spec(spec: &str) -> Result<AgentConfig, String> {
-    let parts: Vec<&str> = spec.splitn(4, ':').collect();
+    parse_participant_spec(spec, None)
+}
+
+fn parse_participant_spec(spec: &str, forced_role: Option<&str>) -> Result<AgentConfig, String> {
+    let parts: Vec<&str> = spec.splitn(3, ':').collect();
     if parts.len() < 3 {
         return Err(format!(
             "invalid agent spec: '{spec}'. expected name:provider:model[:role]"
         ));
     }
 
-    let role = if parts.len() >= 4 { parts[3] } else { "debater" };
-
-    // Look up role preset for system prompt
     let role_presets = presets::role_presets();
+    // Model IDs may contain colons (for example an OpenRouter :free suffix).
+    // Only a recognized final role disambiguates the optional agent role.
+    // --judge has no role suffix: its entire remaining string is the model ID.
+    let (model, role) = if let Some(role) = forced_role {
+        (parts[2], role)
+    } else if let Some((model, role)) = parts[2].rsplit_once(':') {
+        if role_presets.iter().any(|preset| preset.name == role) {
+            (model, role)
+        } else {
+            (parts[2], "debater")
+        }
+    } else {
+        (parts[2], "debater")
+    };
+    if parts[0].trim().is_empty() || parts[1].trim().is_empty() || model.trim().is_empty() {
+        return Err("Agent name, provider, and model must all be nonempty.".to_string());
+    }
+
+    // Look up the final role, including the forced judge role, for its prompt.
     let system_prompt = role_presets
         .iter()
         .find(|r| r.name == role)
@@ -127,7 +147,7 @@ fn parse_agent_spec(spec: &str) -> Result<AgentConfig, String> {
     Ok(AgentConfig {
         name: parts[0].to_string(),
         provider: parts[1].to_string(),
-        model: parts[2].to_string(),
+        model: model.to_string(),
         system_prompt,
         role: role.to_string(),
     })
@@ -142,11 +162,7 @@ fn cmd_list_presets() -> Result<(), String> {
     println!("{BOLD}debate presets:{RESET}\n");
     for p in &presets {
         let agents: Vec<&str> = p.agents.iter().map(|a| a.name.as_str()).collect();
-        println!(
-            "  {CYAN}{}{RESET}  {DIM}({}){RESET}",
-            p.name,
-            p.category
-        );
+        println!("  {CYAN}{}{RESET}  {DIM}({}){RESET}", p.name, p.category);
         println!("    {}", p.description);
         println!(
             "    agents: {}  |  {} {} rounds",
@@ -159,11 +175,18 @@ fn cmd_list_presets() -> Result<(), String> {
     Ok(())
 }
 
+fn model_listing_api_key(config: &AppConfig, provider_name: &str) -> Result<String, String> {
+    if provider_name == "claude-code" {
+        return Ok(String::new());
+    }
+    config
+        .api_key(provider_name)
+        .ok_or_else(|| format!("no API key configured for '{provider_name}'"))
+}
+
 fn cmd_list_models(provider_name: &str) -> Result<(), String> {
     let config = AppConfig::load();
-    let api_key = config
-        .api_key(provider_name)
-        .ok_or_else(|| format!("no API key configured for '{provider_name}'"))?;
+    let api_key = model_listing_api_key(&config, provider_name)?;
     let p = provider::build_provider(provider_name, &api_key)
         .ok_or_else(|| format!("unknown provider: '{provider_name}'"))?;
 
@@ -179,7 +202,7 @@ fn cmd_list_models(provider_name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_debate(args: DebateArgs) -> Result<(), String> {
+fn build_debate_config(args: &DebateArgs) -> Result<DebateConfig, String> {
     // Parse agent specs from --agent flags
     let mut agents: Vec<AgentConfig> = Vec::new();
     for spec in &args.agent {
@@ -188,21 +211,15 @@ fn cmd_debate(args: DebateArgs) -> Result<(), String> {
 
     // Parse judge specs from --judge flags (force role to "judge")
     for spec in &args.judge {
-        let mut agent = parse_agent_spec(spec)?;
-        agent.role = "judge".to_string();
-        // Inject default judge prompt if none
-        if agent.system_prompt.is_empty() {
-            if let Some(role) = presets::role_presets().iter().find(|r| r.name == "judge") {
-                agent.system_prompt = role.system_prompt.clone();
-            }
-        }
-        agents.push(agent);
+        agents.push(parse_participant_spec(spec, Some("judge"))?);
     }
 
-    let mut rounds = args.rounds;
-    let mut termination = args.termination.clone();
-    let mut visibility = args.visibility.clone();
-    let persist = !args.no_persist;
+    let mut rounds = args.rounds.unwrap_or(10);
+    let mut termination = args
+        .termination
+        .clone()
+        .unwrap_or_else(|| "convergence".into());
+    let mut visibility = args.visibility.clone().unwrap_or_else(|| "group".into());
 
     // Apply preset defaults if specified
     if let Some(ref preset_name) = args.preset {
@@ -212,13 +229,15 @@ fn cmd_debate(args: DebateArgs) -> Result<(), String> {
             .find(|p| p.name == *preset_name || p.name.replace(' ', "-") == *preset_name)
             .ok_or_else(|| format!("unknown preset: {preset_name}"))?;
 
-        if termination == "convergence" {
+        if args.termination.is_none() {
             termination = found.termination.clone();
         }
-        if rounds == 10 {
+        if args.rounds.is_none() {
             rounds = found.default_rounds;
         }
-        visibility = found.visibility.clone();
+        if args.visibility.is_none() {
+            visibility = found.visibility.clone();
+        }
 
         // If no agents specified, apply preset agent templates
         if agents.is_empty() {
@@ -230,9 +249,7 @@ fn cmd_debate(args: DebateArgs) -> Result<(), String> {
                     name: pa.name.clone(),
                     provider: String::new(),
                     model: String::new(),
-                    system_prompt: role_preset
-                        .map(|r| r.system_prompt)
-                        .unwrap_or_default(),
+                    system_prompt: role_preset.map(|r| r.system_prompt).unwrap_or_default(),
                     role: pa.role.clone(),
                 });
             }
@@ -252,25 +269,11 @@ fn cmd_debate(args: DebateArgs) -> Result<(), String> {
     if agents.len() < 2 {
         return Err("at least 2 agents required (use --agent and/or --judge)".to_string());
     }
-    if args.topic.is_empty() {
-        return Err("at least one --topic is required".to_string());
+    if args.topic.is_empty() || args.topic.iter().any(|topic| topic.trim().is_empty()) {
+        return Err("at least one nonempty --topic is required".to_string());
     }
-
-    // Validate providers
-    let config = AppConfig::load();
-    for agent in &agents {
-        if agent.provider.is_empty() {
-            return Err(format!(
-                "agent '{}' has no provider. specify as name:provider:model[:role]",
-                agent.name
-            ));
-        }
-        if config.api_key(&agent.provider).is_none() {
-            eprintln!(
-                "{YELLOW}warning:{RESET} no API key for provider '{}' (agent '{}')",
-                agent.provider, agent.name
-            );
-        }
+    if args.name.trim().is_empty() {
+        return Err("a nonempty --name is required".to_string());
     }
 
     let debate_config = DebateConfig {
@@ -282,22 +285,34 @@ fn cmd_debate(args: DebateArgs) -> Result<(), String> {
         max_rounds: rounds,
         convergence_threshold: 2,
     };
+    crate::orchestrator::validate_debate_config(&debate_config)?;
+    Ok(debate_config)
+}
+
+fn cmd_debate(args: DebateArgs) -> Result<(), String> {
+    let debate_config = build_debate_config(&args)?;
+    let agents = debate_config.agents.clone();
+    let rounds = debate_config.max_rounds;
+    let persist = !args.no_persist;
+
+    let config = AppConfig::load();
+    for agent in &agents {
+        if agent.provider != "claude-code" && config.api_key(&agent.provider).is_none() {
+            eprintln!(
+                "{YELLOW}warning:{RESET} no API key for provider '{}' (agent '{}')",
+                agent.provider, agent.name
+            );
+        }
+    }
 
     // TUI mode (default) vs plain text mode
     if !args.plain {
-        return crate::tui::run_tui_debate(
-            debate_config,
-            agents,
-            persist,
-        );
+        return crate::tui::run_tui_debate(debate_config, agents, persist);
     }
 
     // Plain text mode — print header
     println!();
-    println!(
-        "  {BOLD}{CYAN}▸ {}{RESET}",
-        args.name
-    );
+    println!("  {BOLD}{CYAN}▸ {}{RESET}", args.name);
     println!();
     for (i, agent) in agents.iter().enumerate() {
         let color = agent_color(i);
@@ -337,6 +352,14 @@ fn cmd_debate(args: DebateArgs) -> Result<(), String> {
         }
     }
 
+    run_plain_debate(debate_config, providers, persist)
+}
+
+fn run_plain_debate(
+    debate_config: DebateConfig,
+    providers: Vec<Option<Box<dyn Provider>>>,
+    persist: bool,
+) -> Result<(), String> {
     // Initialize debate state
     let mut state = DebateState::new(debate_config.clone());
     state.status = DebateStatus::Running;
@@ -344,7 +367,7 @@ fn cmd_debate(args: DebateArgs) -> Result<(), String> {
 
     // Persist to disk if requested
     if persist {
-        crate::orchestrator::init_team_on_disk(&debate_config);
+        crate::orchestrator::init_team_on_disk(&debate_config)?;
     }
 
     // Main debate loop
@@ -394,6 +417,10 @@ fn cmd_debate(args: DebateArgs) -> Result<(), String> {
                 match provider.chat_streaming(&context, &agent_config.model, &mut on_chunk) {
                     Ok(text) => break 'call text,
                     Err(e) => {
+                        if !crate::orchestrator::should_retry(&e, attempt) {
+                            last_err = Some(e);
+                            break;
+                        }
                         if attempt < 3 {
                             let delay = crate::orchestrator::retry_delay(&e, attempt);
                             eprintln!(
@@ -407,22 +434,32 @@ fn cmd_debate(args: DebateArgs) -> Result<(), String> {
                     }
                 }
             }
-            let err_msg = format!("agent '{}' failed: {}", agent_config.name, last_err.unwrap());
+            let err_msg = format!(
+                "agent '{}' failed: {}",
+                agent_config.name,
+                last_err.unwrap()
+            );
             state.status = DebateStatus::Error(err_msg.clone());
             eprintln!("\n  {RED}{BOLD}error:{RESET} {err_msg}");
             break 'debate;
         };
 
-        println!("\n");
-
         // Build message via shared helper
-        let (next_idx, new_round) = crate::orchestrator::next_turn(agent_idx, state.config.agents.len());
-        let msg = crate::orchestrator::make_message(&agent_config, &response, &debate_config, agent_idx, state.current_round);
+        let (next_idx, new_round) =
+            crate::orchestrator::next_turn(agent_idx, state.config.agents.len());
+        let msg = crate::orchestrator::make_message(
+            &agent_config,
+            &response,
+            &debate_config,
+            agent_idx,
+            state.current_round,
+        );
 
         // Persist
         if persist {
-            crate::orchestrator::persist_message(&msg);
+            crate::orchestrator::persist_message(&msg)?;
         }
+        println!("\n");
 
         // Update state
         state.messages.push(msg);
@@ -432,7 +469,11 @@ fn cmd_debate(args: DebateArgs) -> Result<(), String> {
             state.current_round += 1;
             println!("  {DIM}── round {} ──{RESET}\n", state.current_round);
 
-            if let Some(topic) = crate::orchestrator::advance_topic(&state.config, state.current_round, state.current_topic_idx) {
+            if let Some(topic) = crate::orchestrator::advance_topic(
+                &state.config,
+                state.current_round,
+                state.current_topic_idx,
+            ) {
                 state.current_topic_idx += 1;
                 println!("  {MAGENTA}▸ next topic:{RESET} {topic}\n");
             }
@@ -458,12 +499,15 @@ fn cmd_debate(args: DebateArgs) -> Result<(), String> {
     if persist {
         println!(
             "  {DIM}saved to: ~/.claude/teams/{}/{RESET}",
-            args.name
+            debate_config.team_name
         );
     }
     println!();
 
-    Ok(())
+    match state.status {
+        DebateStatus::Error(error) => Err(error),
+        _ => Ok(()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -478,18 +522,23 @@ mod tests {
     #[test]
     fn parse_minimal_debate() {
         let args = Cli::parse_from([
-            "agora", "debate",
-            "--name", "test",
-            "--agent", "a:groq:llama-3.3-70b-versatile:debater",
-            "--agent", "b:groq:llama-3.3-70b-versatile:debater",
-            "--topic", "test topic",
+            "agora",
+            "debate",
+            "--name",
+            "test",
+            "--agent",
+            "a:groq:llama-3.3-70b-versatile:debater",
+            "--agent",
+            "b:groq:llama-3.3-70b-versatile:debater",
+            "--topic",
+            "test topic",
         ]);
         match args.command {
             Commands::Debate(d) => {
                 assert_eq!(d.name, "test");
                 assert_eq!(d.agent.len(), 2);
                 assert_eq!(d.topic.len(), 1);
-                assert_eq!(d.rounds, 10);
+                assert_eq!(d.rounds, None);
             }
             _ => panic!("expected debate command"),
         }
@@ -520,14 +569,113 @@ mod tests {
     }
 
     #[test]
+    fn parse_agent_preserves_colon_model_ids_with_optional_role() {
+        let agent = parse_agent_spec("a:openrouter:vendor/model:free").unwrap();
+        assert_eq!(agent.model, "vendor/model:free");
+        assert_eq!(agent.role, "debater");
+        let agent = parse_agent_spec("a:openrouter:vendor/model:free:critic").unwrap();
+        assert_eq!(agent.model, "vendor/model:free");
+        assert_eq!(agent.role, "critic");
+        let agent = parse_agent_spec("a:openrouter:vendor/model:version:free:judge").unwrap();
+        assert_eq!(agent.model, "vendor/model:version:free");
+        assert_eq!(agent.role, "judge");
+    }
+
+    #[test]
+    fn parse_judge_preserves_model_and_uses_judge_prompt() {
+        let judge_prompt = presets::role_presets()
+            .into_iter()
+            .find(|role| role.name == "judge")
+            .unwrap()
+            .system_prompt;
+        for model in ["vendor/model", "vendor/model:free", "vendor/model:judge"] {
+            let judge =
+                parse_participant_spec(&format!("j:openrouter:{model}"), Some("judge")).unwrap();
+            assert_eq!(judge.model, model);
+            assert_eq!(judge.role, "judge");
+            assert_eq!(judge.system_prompt, judge_prompt);
+        }
+    }
+
+    #[test]
+    fn parse_agent_rejects_empty_required_fields() {
+        for spec in [":groq:model", "a::model", "a:groq:", "a:groq::judge"] {
+            assert!(parse_agent_spec(spec).is_err(), "accepted {spec}");
+        }
+        // A bare model named "judge" is valid; only its explicit suffix is a role.
+        assert!(parse_agent_spec("a:groq:judge").is_ok());
+    }
+
+    fn valid_debate_args() -> DebateArgs {
+        let cli = Cli::try_parse_from([
+            "agora",
+            "debate",
+            "--name",
+            "test",
+            "--agent",
+            "a:groq:model",
+            "--judge",
+            "j:groq:model",
+            "--topic",
+            "test topic",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Debate(args) => args,
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn debate_validation_runs_before_provider_or_tui_startup() {
+        let valid = build_debate_config(&valid_debate_args()).unwrap();
+        assert_eq!(valid.agents[1].role, "judge");
+        assert_ne!(valid.agents[0].system_prompt, valid.agents[1].system_prompt);
+
+        let mut args = valid_debate_args();
+        args.judge = vec!["a:groq:model".into()];
+        assert!(build_debate_config(&args)
+            .unwrap_err()
+            .contains("unique name"));
+        let mut args = valid_debate_args();
+        args.agent = vec!["a:groq: ".into()];
+        assert!(build_debate_config(&args).is_err());
+        let mut args = valid_debate_args();
+        args.topic = vec![" ".into()];
+        assert!(build_debate_config(&args).is_err());
+        let mut args = valid_debate_args();
+        args.name = " ".into();
+        assert!(build_debate_config(&args).is_err());
+    }
+
+    #[test]
+    fn cli_rejects_invalid_modes_and_zero_rounds() {
+        for (flag, value) in [
+            ("--termination", "typo"),
+            ("--visibility", "typo"),
+            ("--rounds", "0"),
+        ] {
+            assert!(
+                Cli::try_parse_from(["agora", "debate", "--name", "test", flag, value]).is_err()
+            );
+        }
+    }
+
+    #[test]
     fn parse_with_preset() {
         let args = Cli::parse_from([
-            "agora", "debate",
-            "--name", "test",
-            "--preset", "1v1-duel",
-            "--agent", "a:groq:model:debater",
-            "--agent", "b:groq:model:debater",
-            "--topic", "test",
+            "agora",
+            "debate",
+            "--name",
+            "test",
+            "--preset",
+            "1v1-duel",
+            "--agent",
+            "a:groq:model:debater",
+            "--agent",
+            "b:groq:model:debater",
+            "--topic",
+            "test",
         ]);
         match args.command {
             Commands::Debate(d) => {
@@ -538,13 +686,69 @@ mod tests {
     }
 
     #[test]
+    fn explicit_flags_override_presets_even_when_equal_to_general_defaults() {
+        let mut args = valid_debate_args();
+        let defaults = build_debate_config(&args).unwrap();
+        assert_eq!(defaults.max_rounds, 10);
+        args.preset = Some("1v1-duel".into());
+        let preset = build_debate_config(&args).unwrap();
+        assert_eq!(preset.max_rounds, 5);
+        assert_eq!(preset.termination, "fixed");
+        args.rounds = Some(10);
+        args.termination = Some("convergence".into());
+        args.visibility = Some("directed".into());
+        let explicit = build_debate_config(&args).unwrap();
+        assert_eq!(explicit.max_rounds, 10);
+        assert_eq!(explicit.termination, "convergence");
+        assert_eq!(explicit.visibility, "directed");
+    }
+
+    #[test]
+    fn plain_provider_failure_returns_an_error_without_retrying_authentication() {
+        struct Rejected(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl Provider for Rejected {
+            fn chat(
+                &self,
+                _: &[crate::provider::ChatMessage],
+                _: &str,
+            ) -> Result<String, crate::provider::ProviderError> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Err(crate::provider::ProviderError::Auth(
+                    "synthetic rejection".into(),
+                ))
+            }
+            fn list_models(
+                &self,
+            ) -> Result<Vec<crate::provider::ModelInfo>, crate::provider::ProviderError>
+            {
+                Ok(vec![])
+            }
+        }
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let config = build_debate_config(&valid_debate_args()).unwrap();
+        let providers = config
+            .agents
+            .iter()
+            .map(|_| Some(Box::new(Rejected(calls.clone())) as Box<dyn Provider>))
+            .collect();
+        let result = run_plain_debate(config, providers, false);
+        assert!(result.unwrap_err().contains("synthetic rejection"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[test]
     fn parse_plain_flag() {
         let args = Cli::parse_from([
-            "agora", "debate",
-            "--name", "test",
-            "--agent", "a:groq:model:debater",
-            "--agent", "b:groq:model:debater",
-            "--topic", "test",
+            "agora",
+            "debate",
+            "--name",
+            "test",
+            "--agent",
+            "a:groq:model:debater",
+            "--agent",
+            "b:groq:model:debater",
+            "--topic",
+            "test",
             "--plain",
         ]);
         match args.command {
@@ -566,5 +770,25 @@ mod tests {
             Commands::ListModels { provider } => assert_eq!(provider, "groq"),
             _ => panic!("expected list-models command"),
         }
+    }
+
+    #[test]
+    fn model_listing_allows_keyless_claude_code_but_keeps_api_provider_requirements() {
+        let mut config = AppConfig::default();
+        assert_eq!(model_listing_api_key(&config, "claude-code").unwrap(), "");
+        assert!(model_listing_api_key(&config, "openai").is_err());
+        config.providers.insert(
+            "openai".into(),
+            crate::config::ProviderConfig {
+                api_key: "synthetic-test-key".into(),
+                enabled: true,
+            },
+        );
+        assert_eq!(
+            model_listing_api_key(&config, "openai").unwrap(),
+            "synthetic-test-key"
+        );
+        config.providers.get_mut("openai").unwrap().enabled = false;
+        assert!(model_listing_api_key(&config, "openai").is_err());
     }
 }

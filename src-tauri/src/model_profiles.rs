@@ -199,45 +199,36 @@ static ALIASES: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(||
         ("claude-sonnet-4", "claude-sonnet-4-6"),
         ("haiku", "claude-haiku-4-5-20251001"),
         ("claude-haiku-4-5", "claude-haiku-4-5-20251001"),
-
         // OpenAI
         ("gpt-4o-2024-08-06", "gpt-4o"),
         ("gpt-4.1-2025-04-14", "gpt-4.1"),
         ("o1-2024-12-17", "o1"),
         ("o3-2025-04-16", "o3"),
         ("o4-mini-2025-04-16", "o4-mini"),
-
         // Google
         ("gemini-2.0-flash-001", "gemini-2.0-flash"),
-
         // DeepSeek
         ("deepseek-v3", "deepseek-chat"),
         ("deepseek-v3.2", "deepseek-chat"),
         ("deepseek-r1", "deepseek-reasoner"),
-
         // Moonshot / Kimi
         ("moonshotai/kimi-k2", "kimi-k2"),
         ("moonshot-v1-8k", "moonshot-v1-128k"),
         ("moonshot-v1-32k", "moonshot-v1-128k"),
-
         // MiniMax
         ("minimax-m2.5-lightning", "minimax-m2.5"),
-
         // Zhipu / Z.ai
         ("z-ai/glm-5", "glm-5"),
-
         // Meta / Llama
         ("meta-llama/llama-4-scout", "llama-4-scout"),
         ("meta-llama/llama-4-maverick", "llama-4-maverick"),
         ("llama-3.3-70b-versatile", "llama-3.3-70b"),
         ("meta-llama/llama-3.3-70b-instruct", "llama-3.3-70b"),
-
         // Mistral
         ("mistral-large-latest", "mistral-large-2512"),
         ("mistral-large-3", "mistral-large-2512"),
         ("codestral-latest", "codestral-2508"),
         ("open-mixtral-8x22b", "mixtral-8x22b"),
-
         // Qwen
         ("qwen3-235b", "qwen3-235b-a22b"),
         ("qwen/qwen3-235b-a22b", "qwen3-235b-a22b"),
